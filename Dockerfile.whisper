@@ -1,0 +1,40 @@
+# whisper.cpp built from source. There is no reliably-tagged upstream server
+# image, and building it here takes ~5 min on the T470 but produces a ~40 MB
+# runtime layer with no Python or torch anywhere near it.
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates wget \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp .
+
+# BUILD_SHARED_LIBS=OFF is load-bearing. Upstream now builds libwhisper.so and
+# libggml.so alongside the binary, and copying only the executable into the
+# runtime stage produced a container that looped on
+#   "error while loading shared libraries: libwhisper.so.1"
+# — exit 127, which reads like a missing command rather than a missing library.
+# Linking statically keeps the runtime stage a single self-contained binary and
+# removes the whole class of problem.
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+ && cmake --build build --config Release -j"$(nproc)" --target whisper-server
+
+# tiny.en is ~75 MB and plenty for short spoken prompts. Swap for base.en
+# (~150 MB) if accuracy on names or jargon matters more than latency.
+RUN sh ./models/download-ggml-model.sh tiny.en
+
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build/bin/whisper-server /usr/local/bin/whisper-server
+COPY --from=build /src/models/ggml-tiny.en.bin  /models/ggml-tiny.en.bin
+
+EXPOSE 8080
+# -t 2 matches the i5-6300U's physical cores; STT and generation never run at
+# the same moment, so they are not really competing.
+CMD ["whisper-server", "-m", "/models/ggml-tiny.en.bin", \
+     "--host", "0.0.0.0", "--port", "8080", "-t", "2"]

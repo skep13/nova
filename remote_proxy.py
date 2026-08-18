@@ -1,0 +1,435 @@
+"""Multi-agent router: one OpenAI-shaped endpoint, several free backends.
+
+The page picks an agent by name; this decides where the request actually goes
+and guarantees an answer either way.
+
+    agent: "local"   -> llama.cpp in the next container. Always available.
+    agent: <other>   -> a free hosted provider, if a key for it is installed.
+    anything failing -> silently back to local, so the orb never goes mute.
+
+Every provider here speaks the OpenAI chat-completions shape, which is the
+whole reason this file is short. The Anthropic version it replaces needed a
+translation layer in both directions; these need a base URL and a key, so all
+four share a single code path and the streaming case is close to a byte relay.
+
+Keys live one-per-file in /run/keys/<agent>.key, mounted read-only. No key
+means the agent is simply never offered — there is no half-configured state,
+and nothing here can spend money because none of these backends bill.
+
+OFFLINE IS THE DEFAULT, NOT THE FALLBACK. Orb is a search-and-rescue device:
+local answers everything unless the user deliberately picks otherwise, and any
+remote failure lands straight back on local rather than surfacing an error.
+"""
+import datetime
+import json
+import os
+import pathlib
+import re
+import time
+
+import aiohttp
+from aiohttp import web
+
+LOCAL_URL = os.environ.get("LOCAL_URL", "http://llama:8080/v1/chat/completions")
+KEY_DIR = pathlib.Path(os.environ.get("KEY_DIR", "/run/keys"))
+LOG_DIR = pathlib.Path(os.environ.get("LOG_DIR", "/logs"))
+
+# Only the tail of a conversation is worth resending. Free tiers are limited by
+# tokens-per-minute far more often than by requests, so this protects the thing
+# that actually runs out.
+HISTORY_TURNS = int(os.environ.get("REMOTE_HISTORY_TURNS", "6"))
+MAX_TOKENS = int(os.environ.get("REMOTE_MAX_TOKENS", "700"))
+TIMEOUT_S = int(os.environ.get("REMOTE_TIMEOUT", "60"))
+
+# Tags the page puts on messages that exist only to prop up a 1.5B. A hosted
+# 70B needs none of them, and dropping them is ~650 tokens off every remote
+# request — which on a 12K-tokens-per-minute free tier is the difference
+# between a working assistant and a rate-limited one.
+#   example   - few-shot turns teaching a tone      (~200 tok)
+#   reference - Wikipedia excerpt from the archive  (~300 tok)
+#   style     - remedial prompt coaching            (~150 tok)
+# 'memory' and the user's own notes are NOT dropped: no hosted model can know
+# them, so they are the one thing worth the tokens.
+DROP_FOR_REMOTE = {"example", "reference", "style"}
+
+
+# --- the roster -------------------------------------------------------------
+# label   : what the user sees on the rail
+# model   : overridable per agent, because hosted model IDs get retired often
+#           and a rename should never need a rebuild
+# note    : the free allowance, so /agents is self-documenting
+AGENTS = [
+    {
+        "name": "local",
+        "label": "local",
+        "url": LOCAL_URL,
+        "model": None,                       # llama serves whatever it loaded
+        "note": "offline, always available",
+    },
+    {
+        "name": "fast",
+        "label": "fast",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "note": "Groq · ~1000 req/day, 12K tokens/min",
+    },
+    # Was Cerebras. Dropped 2026-08-16: their free credits require a card on
+    # file and expire after 30 days, which is a metered account by another
+    # name. OpenRouter needs no card and its :free models cost nothing at a
+    # zero balance.
+    {
+        "name": "deep",
+        "label": "deep",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-r1:free"),
+        "note": "OpenRouter · ~50 req/day, 20/min",
+    },
+    {
+        "name": "wide",
+        "label": "wide",
+        "url": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "model": os.environ.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct"),
+        "note": "NVIDIA · 1000 credits, 40 req/min",
+    },
+    {
+        "name": "long",
+        "label": "long",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "model": os.environ.get("GEMINI_MODEL", "gemini-3.7-flash"),
+        "note": "Google AI Studio · ~1500 req/day, 1M context",
+        # Gemini 3.x reasons before answering and that thinking is billed
+        # against max_tokens while being invisible in the reply. Measured: 392
+        # total tokens for a 44-token answer. At the shared 700 the thinking
+        # eats half the budget and a long procedure truncates mid-step, which
+        # looks exactly like the model giving up. Its own ceiling instead.
+        "max_tokens": int(os.environ.get("GEMINI_MAX_TOKENS", "2000")),
+    },
+]
+BY_NAME = {a["name"]: a for a in AGENTS}
+
+# Last upstream error per agent. A wrong model ID is the single most likely
+# failure here — provider catalogues churn — and without this it looks
+# identical to "no key", which sends you debugging the wrong thing.
+_last_error = {}
+
+# Configuration failures, as opposed to transient ones. A bad key, a retired
+# model or an unfunded account will fail identically on every request, and an
+# agent in that state must stop being offered — otherwise the rail button
+# silently serves local answers under a remote label, which is worse than the
+# agent simply not being there.
+#
+# Rate limits (429) and server errors are deliberately NOT in here: those are
+# temporary, and falling back for one request is the correct response.
+HARD_CODES = ("401", "402", "403", "404")
+HARD_COOLDOWN_S = 600           # re-offer after 10 min, so a fixed account heals
+_hard_fail = {}                 # agent name -> (monotonic seconds, reason)
+
+
+def read_key(name):
+    try:
+        return (KEY_DIR / f"{name}.key").read_text(encoding="utf-8").strip() or None
+    except Exception:
+        return None
+
+
+def note_failure(name, err):
+    _last_error[name] = err[:300]
+    if err.split(":", 1)[0].strip() in HARD_CODES:
+        _hard_fail[name] = (time.monotonic(), err[:300])
+
+
+def note_success(name):
+    _last_error.pop(name, None)
+    _hard_fail.pop(name, None)
+
+
+def hard_failed(name):
+    hit = _hard_fail.get(name)
+    if not hit:
+        return None
+    if time.monotonic() - hit[0] > HARD_COOLDOWN_S:
+        _hard_fail.pop(name, None)          # cooldown over: let it try again
+        return None
+    return hit[1]
+
+
+def available(agent):
+    if agent["name"] == "local":
+        return True
+    return bool(read_key(agent["name"])) and not hard_failed(agent["name"])
+
+
+# --- logging ----------------------------------------------------------------
+# Deliberately /logs and NOT /mem: the page ingests every .md under mem and
+# injects it into prompts, so logging there would poison the context within a
+# day. These are a record, not a memory.
+def slug(s, n=48):
+    return (re.sub(r"[^a-zA-Z0-9]+", "-", s.lower()).strip("-")[:n] or "exchange").rstrip("-")
+
+
+# The local model's name is asked of llama rather than assumed. It used to be
+# a hardcoded "qwen2.5-1.5b" fallback, which silently kept claiming 1.5B after
+# the box was upgraded to a 3B — every local log line was wrong, and the logs
+# are the only record of which brain answered.
+_local_model = None
+
+
+async def local_model_name(session):
+    global _local_model
+    if _local_model:
+        return _local_model
+    try:
+        base = LOCAL_URL.rsplit("/chat/completions", 1)[0] + "/models"
+        async with session.get(base, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = (await r.json()).get("data") or []
+            if data:
+                _local_model = data[0].get("id")
+    except Exception:
+        pass
+    return _local_model or "local (name unavailable)"
+
+
+def log_exchange(question, answer, agent_name, model):
+    if not (question and answer):
+        return
+    try:
+        now = datetime.datetime.now()
+        day = LOG_DIR / now.strftime("%Y-%m-%d")
+        day.mkdir(parents=True, exist_ok=True)
+        (day / f"{now.strftime('%H%M%S')}-{slug(question)}.md").write_text(
+            "---\n"
+            f"created: {now.isoformat(timespec='seconds')}\n"
+            f"agent: {agent_name}\n"
+            f"model: {model or 'qwen2.5-1.5b'}\n"
+            "---\n\n"
+            f"# {question.strip()[:200]}\n\n{answer.strip()}\n",
+            encoding="utf-8")
+    except Exception:
+        pass                                # logging must never break a reply
+
+
+# --- request shaping --------------------------------------------------------
+def remote_payload(agent, payload):
+    """Rebuild the request for a hosted provider, allowlist style.
+
+    Deliberately NOT a copy-and-tweak of the incoming body. It carries
+    llama.cpp-only fields (repeat_penalty) and per-message `name` tags that
+    strict providers reject outright, and a 400 from a free tier is
+    indistinguishable from being out of quota. Only known-good keys go out.
+    """
+    msgs = [m for m in payload.get("messages", [])
+            if m.get("name") not in DROP_FOR_REMOTE]
+
+    system = [m.get("content", "") for m in msgs if m.get("role") == "system"]
+    turns = [{"role": m["role"], "content": m.get("content", "")}
+             for m in msgs if m.get("role") in ("user", "assistant") and m.get("content")]
+
+    if len(turns) > HISTORY_TURNS:
+        turns = turns[-HISTORY_TURNS:]
+    while turns and turns[0]["role"] != "user":
+        turns.pop(0)                        # every provider wants a user turn first
+
+    out = []
+    if system:
+        out.append({"role": "system", "content": "\n\n".join(s for s in system if s)})
+    out.extend(turns)
+
+    # The remote budget WINS over the page's request — it is not a ceiling.
+    #
+    # The page asks for 600 because that is what llama.cpp needs to finish a
+    # procedure at 13 tok/s: a number about local generation speed, not about
+    # the model. Applied to a hosted model it truncates mid-step, which reads
+    # as the model giving up. Measured: deepseek-v4-flash cut off at "6. Apply
+    # an antiseptic (optional" on exactly this question.
+    #
+    # Output on these tiers is free and fast, so there is nothing to protect by
+    # capping it low. Per-agent overrides exist for reasoning models, which
+    # spend most of their allowance on thinking the user never sees.
+    limit = agent.get("max_tokens") or MAX_TOKENS
+
+    body = {
+        "model": agent["model"],
+        "messages": out,
+        "stream": bool(payload.get("stream")),
+        "max_tokens": limit,
+    }
+    if payload.get("temperature") is not None:
+        body["temperature"] = max(0.0, min(1.0, float(payload["temperature"])))
+    return body
+
+
+def text_from(chunk):
+    """Pull assistant text out of one OpenAI SSE delta, for the log."""
+    try:
+        return chunk["choices"][0].get("delta", {}).get("content", "") or ""
+    except Exception:
+        return ""
+
+
+async def relay(url, body, headers, request, resp, collected, timeout_s):
+    """Stream an OpenAI-shaped upstream through untouched.
+
+    Both ends speak the same wire format, so bytes pass straight through and
+    only a copy is tapped off for the log — no re-encoding, no buffering.
+
+    The ordering matters: the response is prepared only AFTER the upstream has
+    answered 200. Raising before that point means nothing has reached the
+    browser yet, which is what lets the caller fall back to local invisibly
+    rather than leaving a half-written bubble that restarts itself.
+    """
+    # sock_read, NOT total. A total timeout kills a stream for being long,
+    # which is exactly what a good answer to "give me the steps" looks like —
+    # measured 30-40s for a full first-aid procedure. What actually indicates
+    # trouble is a stream that STOPS producing, so bound the gap between
+    # chunks instead of the whole response. Connect is bounded separately so a
+    # black-holed provider still fails fast.
+    timeout = aiohttp.ClientTimeout(sock_connect=15, sock_read=timeout_s)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.post(url, json=body, headers=headers or {}) as r:
+            if r.status != 200:
+                raise RuntimeError(f"{r.status}: {(await r.text())[:300]}")
+            if resp is not None and not resp.prepared:
+                await resp.prepare(request)
+            async for raw in r.content:
+                if resp is not None:
+                    await resp.write(raw)
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("data:"):
+                    b = line[5:].strip()
+                    if b and b != "[DONE]":
+                        try:
+                            collected.append(text_from(json.loads(b)))
+                        except Exception:
+                            pass
+
+
+async def chat(request):
+    payload = await request.json()
+    # Popped, not read: the remainder is forwarded verbatim on the local path
+    # and llama has no business seeing a field meant for this router.
+    want = payload.pop("agent", "local") or "local"
+    stream = bool(payload.get("stream"))
+    question = next((m.get("content", "") for m in reversed(payload.get("messages", []))
+                     if m.get("role") == "user"), "")
+
+    agent = BY_NAME.get(want, BY_NAME["local"])
+    if not available(agent):
+        agent = BY_NAME["local"]            # key pulled since the page loaded
+
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-cache",
+                                       "X-Accel-Buffering": "no"})
+    collected = []
+
+    if agent["name"] != "local":
+        key = read_key(agent["name"])
+        body = remote_payload(agent, payload)
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        try:
+            if stream:
+                await relay(agent["url"], body, headers, request, resp,
+                            collected, TIMEOUT_S)
+            else:
+                timeout = aiohttp.ClientTimeout(total=TIMEOUT_S)
+                async with aiohttp.ClientSession(timeout=timeout) as s:
+                    async with s.post(agent["url"], json=body, headers=headers) as r:
+                        if r.status != 200:
+                            raise RuntimeError(f"{r.status}: {(await r.text())[:300]}")
+                        out = await r.json()
+                collected = [out["choices"][0]["message"]["content"]]
+                note_success(agent["name"])
+                log_exchange(question, collected[0], agent["name"], agent["model"])
+                return web.json_response(out)
+
+            note_success(agent["name"])
+            log_exchange(question, "".join(collected), agent["name"], agent["model"])
+            return resp
+        except Exception as exc:
+            # Rate limit, wrong model ID, expired key, no network — all the
+            # same from here: remember why, then answer anyway.
+            note_failure(agent["name"], str(exc))
+            if resp.prepared:
+                await resp.write(b"data: [DONE]\n\n")
+                return resp
+            collected = []
+
+    # Local: the default, and the safety net under every branch above.
+    if stream:
+        await relay(LOCAL_URL, payload, None, request, resp, collected, 900)
+        await resp.write(b"data: [DONE]\n\n")
+        log_exchange(question, "".join(collected), "local", None)
+        return resp
+
+    timeout = aiohttp.ClientTimeout(total=900)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.post(LOCAL_URL, json=payload) as r:
+            out = await r.json()
+    try:
+        # llama echoes the model it loaded on every response - authoritative,
+        # and free compared with a separate lookup.
+        log_exchange(question, out["choices"][0]["message"]["content"], "local",
+                     out.get("model"))
+    except Exception:
+        pass
+    return web.json_response(out)
+
+
+async def diag(request):
+    """One-line-per-event diagnostic sink for the page.
+
+    Speech recognition fails on the DEVICE, in Safari, in ways no amount of
+    reading the source reproduces — and the status line that reports it clears
+    after a second, so it is routinely missed. This lets the phone say what
+    happened somewhere it can be read later.
+
+    Deliberately dumb: append a line, never fail the caller. No transcript text
+    is accepted or stored — only lifecycle timings and capability flags.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    keep = {k: body.get(k) for k in
+            ("event", "error", "ms", "standalone", "secure", "display", "ua", "mode")}
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with (LOG_DIR / "diag.log").open("a", encoding="utf-8") as f:
+            stamp = datetime.datetime.now().isoformat(timespec="seconds")
+            f.write(stamp + " " + json.dumps(keep, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    return web.json_response({"ok": True})
+
+
+async def agents(request):
+    """What the page builds its picker from. Unavailable agents are listed but
+    flagged, so a missing key is visible rather than a silently absent button."""
+    async with aiohttp.ClientSession() as sess:
+        local_name = await local_model_name(sess)
+    return web.json_response({
+        "agents": [{
+            "name": a["name"],
+            "label": a["label"],
+            # Local reports whatever llama actually loaded, so the picker can
+            # never disagree with reality about which brain is answering.
+            "model": a["model"] or local_name,
+            "note": a["note"],
+            "available": available(a),
+            "last_error": _last_error.get(a["name"]),
+            "disabled_reason": hard_failed(a["name"]),
+        } for a in AGENTS],
+        "history_turns": HISTORY_TURNS,
+        "max_tokens": MAX_TOKENS,
+    })
+
+
+app = web.Application(client_max_size=8 * 1024 * 1024)
+app.add_routes([
+    web.post("/v1/chat/completions", chat),
+    web.get("/agents", agents),
+    web.post("/diag", diag),
+])
+
+if __name__ == "__main__":
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    web.run_app(app, host="0.0.0.0", port=5003, print=None)

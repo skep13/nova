@@ -1,0 +1,20 @@
+# Live API keys. The keys/ directory ships its README (which documents where to
+# get keys and what each agent expects) but never a key itself. A private repo
+# is one sharing decision away from being a public one.
+keys/*.key
+
+# Conversation logs and the diagnostic sink. These are a record of what was
+# asked and answered on the device — personal, and worthless to anyone else.
+logs/
+
+# Server-side memory store: facts about the user, injected into prompts.
+mem/
+
+# Offline archives. wikipedia_en_full.zim alone is ~50 GB; these are downloaded
+# on the host, never version-controlled.
+zim/
+*.zim
+
+__pycache__/
+*.pyc
+.DS_Store

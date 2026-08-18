@@ -1,0 +1,15 @@
+# Agent router: OpenAI-shaped in, OpenAI-shaped out, local llama as the floor.
+# No model weights and no translation layer, so it costs almost nothing to run.
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir aiohttp
+
+COPY remote_proxy.py /app/remote_proxy.py
+WORKDIR /app
+
+ENV LOCAL_URL=http://llama:8080/v1/chat/completions \
+    KEY_DIR=/run/keys \
+    LOG_DIR=/logs
+
+EXPOSE 5003
+CMD ["python", "remote_proxy.py"]

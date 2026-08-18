@@ -1,0 +1,201 @@
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: orb-llama
+    restart: unless-stopped
+    volumes:
+      - models:/root/.cache/llama.cpp
+    # Upgraded from Qwen2.5-1.5B when the host went 4 GB -> 8 GB.
+    # Measured on this hardware: 3B = 8.3 tok/s, 1.5B = 16.5 tok/s — exactly
+    # half. Kept anyway, because throughput is not the binding constraint:
+    # 8.3 tok/s is ~370 wpm, still faster than reading (~250) and than speech
+    # (~150), so the extra latency is invisible while streaming.
+    #
+    # What decided it was accuracy on safety content. Asked how much water to
+    # drink hiking in heat, the 1.5B answered "1-2 litres per day" — low enough
+    # to be dangerous. The 3B answered 2.5-3. For a search-and-rescue device
+    # that is the whole argument; the 1.5B is faster at being wrong.
+    command: >
+      -hf bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M
+      --host 0.0.0.0
+      --port 8080
+      -c 8192
+      -t 2
+      --parallel 1
+      --jinja
+    deploy:
+      resources:
+        limits:
+          # Raised from 1500m after the host went 4 GB -> 8 GB. Headroom here
+          # is not about the weights (a 1.5B Q4_K_M is ~1 GB) but the KV cache,
+          # which doubled with the context bump, plus room to try a larger
+          # model without touching this file again.
+          memory: 3500m
+
+  piper:
+    build:
+      context: .
+      dockerfile: Dockerfile.piper
+    image: orb-piper:amy
+    container_name: orb-piper
+    restart: unless-stopped
+    environment:
+      # Settled voice. Overriding the env here avoids a rebuild, and means only
+      # this one model is ever loaded unless another is auditioned explicitly.
+      - VOICE_MODEL=/models/en_US-lessac-high.onnx
+    deploy:
+      resources:
+        limits:
+          # piper leaks: 186 MB fresh -> 266 MB after five syntheses -> 363 MB
+          # over a session, and never releases. 640m gives plenty of headroom
+          # so a restart is rare, while still capping it — uncapped, a leaking
+          # process eventually starves llama of the page cache it mmaps the
+          # model into, which is what made generation erratic before.
+          memory: 640m
+
+  # Agent router. Sits in front of llama on the chat endpoint and sends the
+  # request to whichever backend the page asked for. With no keys installed at
+  # all it is a pass-through to the local model, so the stack behaves exactly
+  # as it did before this container existed.
+  #
+  # Every backend offered here is free — no card, no metered billing. Keys go
+  # in ./keys/<agent>.key, one per file, mounted read-only; an agent with no
+  # key file is simply never offered.
+  #
+  # Model IDs are env vars rather than code because hosted catalogues churn:
+  # providers retire and rename models regularly, and that should be a restart,
+  # not a rebuild. A wrong ID surfaces on /agents as last_error.
+  remote:
+    build:
+      context: .
+      dockerfile: Dockerfile.remote
+    image: orb-remote:latest
+    container_name: orb-remote
+    restart: unless-stopped
+    environment:
+      - GROQ_MODEL=llama-3.3-70b-versatile
+      # OpenRouter rotates its :free models out without warning, so expect this
+      # one to 404 eventually. The router surfaces that on /agents as
+      # last_error; pick a replacement from openrouter.ai/models filtered to
+      # free pricing. The ":free" suffix is what makes it cost nothing.
+      - OPENROUTER_MODEL=deepseek/deepseek-r1:free
+      # Deliberately NOT llama-3.3-70b: `fast` already runs that, and two
+      # agents on the same weights is a picker with a redundant entry. DeepSeek
+      # V4 Flash is a genuinely different model, and NVIDIA's catalogue is the
+      # widest of the four if it ever needs swapping again.
+      - NVIDIA_MODEL=deepseek-ai/deepseek-v4-flash-0731
+      # gemini-2.5-flash is retired for new accounts — it lists in the
+      # catalogue but 404s with "no longer available to new users".
+      # 3.x models reason before answering, so GEMINI_MAX_TOKENS is separate
+      # and larger: thinking is billed against it but never shown.
+      # Measured 2026-08-17, three calls each: 3.5-flash and 3.1-flash-lite
+      # both 3/3, 3.7-flash 2/3, gemini-flash-latest only 1/3 (the rest 503
+      # "experiencing high demand"). 3.5-flash is the strongest of the ones
+      # that actually answer reliably, which matters more here than a newer
+      # version number — a field device that intermittently drops to the 1.5B
+      # is worse than a slightly older model that always responds.
+      - GEMINI_MODEL=gemini-3.5-flash
+      - GEMINI_MAX_TOKENS=2000
+      # Free tiers ration tokens-per-minute far more tightly than requests,
+      # so history depth is the setting that decides whether you get rate
+      # limited mid-conversation.
+      - REMOTE_HISTORY_TURNS=6
+      # Raised from 700: a full first-aid procedure was being cut off mid-step.
+      # Output is free on these tiers and arrives in seconds, so there is
+      # nothing gained by rationing it — and long replies are fine to read on
+      # a wrist. This overrides whatever the page asks for.
+      - REMOTE_MAX_TOKENS=1200
+      # Past this, fall back to local rather than leave the user watching a
+      # dead orb. Hosted 70Bs answer in seconds; 60s means something is wrong.
+      - REMOTE_TIMEOUT=60
+    volumes:
+      - ./logs:/logs
+      - ./keys:/run/keys:ro
+    depends_on:
+      - llama
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  # Offline full English Wikipedia (~50 GB, no images). Costs disk, not RAM —
+  # kiwix-serve mmaps the archive, so a 50 GB dump is barely dearer in memory
+  # than the 938 MB one it replaced. This is what lets a 1.5B model answer
+  # factual questions it would otherwise invent answers to.
+  kiwix:
+    image: ghcr.io/kiwix/kiwix-serve:latest
+    container_name: orb-kiwix
+    restart: unless-stopped
+    volumes:
+      - ./zim:/data:ro
+    # The image's ENTRYPOINT already passes --port=8080; repeating it here made
+    # the arg parser reject everything. Threads capped at 2 to match the cores
+    # this LXC has, which it shares with llama.
+    #
+    # -s enables full-text search ACROSS archives; without it a multi-ZIM
+    # server only searches within one book at a time.
+    #
+    # The Wikipedia medical subset is deliberately absent — the full English
+    # dump already contains it. These add what Wikipedia does not: clinical
+    # depth (mdwiki) and practical field procedure (zimgit).
+    command:
+      - "-t"
+      - "2"
+      - "-m"
+      - "-s"
+      - "8"
+      # zimgit-medicine and zimgit-knots were dropped: each is a SINGLE-article
+      # bundle, so they never won a search against the real collections — every
+      # test hit came from wikipedia_en_full or mdwiki-medicine — while each
+      # open archive still cost memory the model needs for page cache.
+      - "/data/wikipedia_en_full.zim"
+      - "/data/mdwiki-medicine.zim"
+    deploy:
+      resources:
+        limits:
+          # Raised from 480m with the RAM upgrade. kiwix mmaps a 50 GB archive,
+          # so every extra megabyte is search-index page cache that stays
+          # resident instead of being re-read from disk — this is the cheapest
+          # real speed-up available to offline lookups.
+          memory: 1024m
+
+  web:
+    image: nginx:alpine
+    container_name: orb-web
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./manifest.json:/usr/share/nginx/html/manifest.json:ro
+      - ./apple-touch-icon.png:/usr/share/nginx/html/apple-touch-icon.png:ro
+      - ./icon-192.png:/usr/share/nginx/html/icon-192.png:ro
+      - ./icon-512.png:/usr/share/nginx/html/icon-512.png:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./mem:/var/lib/orb/mem          # writable: WebDAV memory store
+    depends_on:
+      - llama
+      - piper
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+
+  # Server-side speech-to-text. No longer optional: it is the ONLY voice path
+  # that works when the page is launched from the iOS home screen, because
+  # webkitSpeechRecognition is broken in standalone mode there. Verified on the
+  # device — dictation works in Safari, dies from the home-screen icon.
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    image: orb-whisper:tiny-en
+    container_name: orb-whisper
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 320m
+
+volumes:
+  models:
