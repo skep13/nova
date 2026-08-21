@@ -197,6 +197,9 @@ services:
       - ./icon-192.png:/usr/share/nginx/html/icon-192.png:ro
       - ./icon-512.png:/usr/share/nginx/html/icon-512.png:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Self-hosted IBM Plex Mono, 45 KB for three weights. A webfont CDN would
+      # be one more thing that has to work on a hillside; this does not.
+      - ./fonts:/usr/share/nginx/html/fonts:ro
       - ./mem:/var/lib/orb/mem          # writable: WebDAV memory store
     depends_on:
       - llama

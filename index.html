@@ -17,12 +17,31 @@
    not broken if the sensor disagrees for a moment.
    Design target: 852 x 393, minus a notch on one short edge.
    ============================================================ */
+/* IBM Plex Mono, self-hosted. A webfont CDN is one more thing that has to
+   work on a hillside; 45 KB in the container does not. Used for every readout
+   and label — a grid reference, a bearing and a model name are instrument
+   values, and mono with tabular figures stops them reflowing as they change.
+   Prose deliberately stays in the system face: the best-legible text this
+   phone can render is what a first-aid procedure should be set in. */
+@font-face{font-family:'Plex Mono';src:url('/fonts/plex-mono-400.woff2') format('woff2');
+  font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'Plex Mono';src:url('/fonts/plex-mono-500.woff2') format('woff2');
+  font-weight:500;font-style:normal;font-display:swap}
+@font-face{font-family:'Plex Mono';src:url('/fonts/plex-mono-600.woff2') format('woff2');
+  font-weight:600;font-style:normal;font-display:swap}
+
 :root{
-  --bg:#050b1a;
-  --ink:#e2eeff;
-  --ink-dim:#7d99c0;
-  --cyan:#4fc3ff;
-  --edge:rgba(120,180,255,.15);
+  /* Near-black rather than black: an unlit instrument reads as dead, and the
+     panel is OLED so this still costs almost nothing. */
+  --bg:#03070f;
+  --ink:#e8f1ff;
+  --ink-dim:#8ba7cd;
+  --ink-faint:#7e9cc4;
+  --cyan:#5cc8ff;
+  --edge:rgba(130,190,255,.13);
+  --edge-lit:rgba(120,200,255,.36);
+  --panel:linear-gradient(180deg,rgba(150,200,255,.115),rgba(120,170,255,.055));
+  --mono:'Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
   --orb:min(34vw, 76vh, 330px);
   --rail:56px;
 }
@@ -39,11 +58,26 @@ body{
 }
 
 /* ---------- ambient background ---------- */
-.bokeh{position:fixed;inset:-20%;z-index:0;pointer-events:none;filter:blur(60px);opacity:.5}
+.bokeh{position:fixed;inset:-20%;z-index:0;pointer-events:none;filter:blur(70px);opacity:.42}
 .bokeh i{position:absolute;border-radius:50%;display:block}
 .bokeh i:nth-child(1){width:46vmax;height:46vmax;left:-8%;top:-12%;background:radial-gradient(circle,#1b4d94,transparent 70%)}
 .bokeh i:nth-child(2){width:38vmax;height:38vmax;right:-10%;top:18%;background:radial-gradient(circle,#0f3572,transparent 70%)}
 .bokeh i:nth-child(3){width:52vmax;height:52vmax;left:12%;bottom:-24%;background:radial-gradient(circle,#123f83,transparent 70%)}
+
+/* Grain. A flat dark rectangle reads as an absence; a faint irregular texture
+   reads as a surface with a light on it. Generated inline so it costs no
+   request and works offline, and kept low enough to be felt not seen. */
+.grain{
+  position:fixed;inset:0;z-index:3;pointer-events:none;opacity:.05;
+  mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/></filter><rect width='140' height='140' filter='url(%23n)' opacity='.5'/></svg>");
+}
+/* Vignette: pulls the eye to the middle and stops the edges of an OLED panel
+   looking like the edges of a black rectangle. */
+.vig{
+  position:fixed;inset:0;z-index:2;pointer-events:none;
+  background:radial-gradient(120% 90% at 50% 45%,transparent 45%,rgba(0,0,0,.55) 100%);
+}
 
 /* ---------- shell: orb | transcript | rail ---------- */
 .app{
@@ -68,11 +102,21 @@ body{
 }
 
 .rail{
+  position:relative;
   flex:0 0 auto;width:var(--rail);
   display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:11px;
-  border-left:1px solid var(--edge);
+  background:linear-gradient(180deg,rgba(120,180,255,.055),rgba(120,180,255,.012));
 }
+/* A hairline that fades at both ends reads as machined; one that runs edge to
+   edge reads as a border someone forgot to style. */
+.rail::before,.mid::after{
+  content:'';position:absolute;top:6%;bottom:6%;width:1px;
+  background:linear-gradient(180deg,transparent,var(--edge) 18%,var(--edge) 82%,transparent);
+}
+.rail::before{left:0}
+.mid::after{right:0}
+.mid{position:relative}
 
 /* ---------- orb ---------- */
 .orb-wrap{
@@ -146,9 +190,10 @@ body.thinking .bloom{animation:think 1.8s ease-in-out infinite}
 /* ---------- status ---------- */
 .status{
   text-align:center;
-  font-size:13px;letter-spacing:.12em;text-transform:uppercase;
-  color:var(--ink-dim);
-  min-height:18px;padding:11px 12px 0;
+  font-family:var(--mono);font-weight:500;
+  font-size:11px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--ink-faint);
+  min-height:18px;padding:13px 12px 0;
   max-width:100%;
 }
 
@@ -161,19 +206,36 @@ body.thinking .bloom{animation:think 1.8s ease-in-out infinite}
   flex-wrap:wrap;padding:10px 8px 0;max-width:100%;
 }
 .chip{
-  font:inherit;font-size:11px;letter-spacing:.08em;
+  font-family:var(--mono);font-weight:500;
+  font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  font-variant-numeric:tabular-nums;
   color:var(--ink-dim);
-  background:rgba(255,255,255,.05);
-  border:1px solid var(--edge);border-radius:999px;
-  padding:4px 10px;
+  background:linear-gradient(180deg,rgba(150,200,255,.09),rgba(120,170,255,.03));
+  border:1px solid var(--edge);border-radius:5px;
+  box-shadow:0 1px 0 rgba(255,255,255,.05) inset;
+  padding:5px 9px;
   cursor:pointer;touch-action:manipulation;
   white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;
-  transition:color .15s,border-color .15s,background .15s;
+  transition:color .18s,border-color .18s,background .18s,box-shadow .18s;
+}
+/* A lit pip rather than a filled pill: reads as a status lamp, and survives
+   being glanced at from an angle better than a colour change alone. */
+.chip::before{
+  content:'';display:inline-block;vertical-align:middle;
+  width:4px;height:4px;border-radius:50%;margin-right:6px;
+  background:var(--ink-faint);
+  box-shadow:none;transition:background .18s,box-shadow .18s;
 }
 .chip:active{background:rgba(79,195,255,.18)}
 /* Lit only when a REMOTE model is answering — local is the default and the
    quiet state, matching the rail button. */
-.chip.remote{color:#bfe7ff;border-color:rgba(79,195,255,.45);background:rgba(79,195,255,.12)}
+.chip.remote{
+  color:#d3ecff;border-color:var(--edge-lit);
+  background:linear-gradient(180deg,rgba(92,200,255,.20),rgba(60,150,240,.08));
+  box-shadow:0 1px 0 rgba(255,255,255,.10) inset,0 0 14px rgba(92,200,255,.18);
+}
+.chip.remote::before{background:var(--cyan);box-shadow:0 0 7px var(--cyan)}
+.chip.geo.fixing::before{background:var(--cyan);box-shadow:0 0 7px var(--cyan)}
 /* A stale fix is worse than no fix if you cannot tell it is stale. */
 .chip.geo.stale{opacity:.55}
 .chip.geo.fixing{color:var(--cyan)}
@@ -185,28 +247,36 @@ body.listening .status{
 .log{
   flex:1 1 auto;min-height:0;
   overflow-y:auto;-webkit-overflow-scrolling:touch;
-  padding:10px 14px 8px;
-  display:flex;flex-direction:column;gap:9px;
+  padding:14px 18px 12px;
+  display:flex;flex-direction:column;gap:11px;
   mask:linear-gradient(to bottom,transparent 0,#000 14px);
   scrollbar-width:none;
   -webkit-user-select:text;user-select:text;
 }
 .log::-webkit-scrollbar{width:0}
 .msg{
-  max-width:90%;padding:9px 13px;border-radius:16px;
-  font-size:17px;white-space:pre-wrap;overflow-wrap:break-word;
-  animation:rise .2s ease-out;
+  max-width:90%;padding:11px 14px;
+  font-size:17px;line-height:1.52;
+  white-space:pre-wrap;overflow-wrap:break-word;
+  animation:rise .22s cubic-bezier(.2,.7,.3,1);
 }
-@keyframes rise{from{opacity:0;transform:translateY(5px)}}
+@keyframes rise{from{opacity:0;transform:translateY(6px) scale(.995)}}
 .msg.user{
   align-self:flex-end;
-  background:linear-gradient(180deg,#2a6fd0,#1d54a8);color:#fff;
-  border-bottom-right-radius:5px;
+  background:linear-gradient(180deg,#1f63c4,#154a99);color:#fff;
+  border:1px solid rgba(150,205,255,.30);
+  border-radius:13px 13px 4px 13px;
+  box-shadow:0 1px 0 rgba(255,255,255,.16) inset,0 8px 20px rgba(6,24,58,.55);
 }
 .msg.bot{
   align-self:flex-start;
-  background:rgba(255,255,255,.06);border:1px solid var(--edge);
-  border-bottom-left-radius:5px;
+  background:var(--panel);
+  border:1px solid var(--edge);
+  border-radius:13px 13px 13px 4px;
+  /* A top-edge highlight and a cast shadow are what separate a panel sitting
+     ON the ground from a rectangle painted INTO it. */
+  box-shadow:0 1px 0 rgba(255,255,255,.07) inset,0 8px 22px rgba(0,0,0,.42);
+  -webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);
 }
 .msg.bot.pending::after{
   content:'';display:inline-block;width:7px;height:7px;margin-left:3px;
@@ -257,10 +327,15 @@ body.listening .status{
   border:1px solid var(--edge);background:rgba(255,255,255,.06);
   color:#cfe4ff;display:grid;place-items:center;
   cursor:pointer;touch-action:manipulation;
-  transition:background .15s,border-color .15s,color .15s;
+  box-shadow:0 1px 0 rgba(255,255,255,.055) inset;
+  transition:background .18s,border-color .18s,color .18s,box-shadow .18s;
 }
 .btn:active{background:rgba(79,195,255,.22)}
-.btn.on{background:rgba(79,195,255,.2);border-color:rgba(79,195,255,.55);color:#bfe7ff}
+.btn.on{
+  background:linear-gradient(180deg,rgba(92,200,255,.24),rgba(60,150,240,.10));
+  border-color:var(--edge-lit);color:#dcf1ff;
+  box-shadow:0 1px 0 rgba(255,255,255,.12) inset,0 0 16px rgba(92,200,255,.22);
+}
 .btn.hide{display:none}
 .btn svg{width:20px;height:20px;fill:currentColor}
 
@@ -310,6 +385,9 @@ html.dimmed .dim{opacity:.92;pointer-events:auto}
 <body class="idle">
 
 <div class="bokeh"><i></i><i></i><i></i></div>
+
+<div class="vig"></div>
+<div class="grain"></div>
 
 <div class="app">
   <div class="left" id="micZone" role="button" tabindex="0" aria-label="Tap to speak">

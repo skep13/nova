@@ -21,3 +21,4 @@ zim/
 __pycache__/
 *.pyc
 .DS_Store
+fonts/*.woff2
