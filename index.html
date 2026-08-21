@@ -70,7 +70,7 @@ body{
 .rail{
   flex:0 0 auto;width:var(--rail);
   display:flex;flex-direction:column;
-  align-items:center;justify-content:center;gap:14px;
+  align-items:center;justify-content:center;gap:11px;
   border-left:1px solid var(--edge);
 }
 
@@ -250,16 +250,19 @@ body.listening .status{
 
 /* ---------- rail controls ---------- */
 .btn{
-  flex:0 0 auto;width:40px;height:40px;border-radius:50%;
+  /* 44px is Apple's minimum comfortable target and this is used at arm's
+     length, in weather, possibly through a glove. Six of these plus the gaps
+     still clear a 393px landscape viewport with room to spare. */
+  flex:0 0 auto;width:44px;height:44px;border-radius:50%;
   border:1px solid var(--edge);background:rgba(255,255,255,.06);
-  color:var(--ink);display:grid;place-items:center;
+  color:#cfe4ff;display:grid;place-items:center;
   cursor:pointer;touch-action:manipulation;
-  transition:background .15s,border-color .15s;
+  transition:background .15s,border-color .15s,color .15s;
 }
 .btn:active{background:rgba(79,195,255,.22)}
 .btn.on{background:rgba(79,195,255,.2);border-color:rgba(79,195,255,.55);color:#bfe7ff}
 .btn.hide{display:none}
-.btn svg{width:18px;height:18px;fill:currentColor}
+.btn svg{width:20px;height:20px;fill:currentColor}
 
 /* muted speaker: a slash, so the state reads at a glance rather than relying
    on a subtle fill change */
@@ -508,6 +511,32 @@ function idleHint(){
 }
 
 /* ============ transcript ============ */
+
+/* Is the reader following the live text, or have they scrolled back to read
+   something? Pinning the view while they are reading is the rudest thing a
+   transcript can do. 40px of slack absorbs momentum scrolling. */
+const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+
+/* Where to leave the view once a reply has finished arriving.
+
+   Pinning to the bottom is right WHILE text streams — you watch it appear. It
+   is wrong the moment it stops: a long answer has scrolled its own beginning
+   off the top, so a first-aid procedure ends up showing step five with steps
+   one to four above the fold and nothing saying so. On a wrist that is the
+   difference between instructions and a fragment.
+
+   So: always put the reply's FIRST line at the top of the view.
+
+   Deliberately unconditional. The first attempt only did this when a single
+   message was taller than the window, which turned out to miss the actual
+   case — the answer had scrolled off the top through CUMULATIVE height, with
+   no one message oversized. The browser clamps scrollTop for us, so a short
+   reply with nothing below it simply stays where it is. */
+function restAt(el){
+  if (!el) return;
+  log.scrollTop = Math.max(0, el.offsetTop - 10);
+}
+
 function bubble(role, text){
   const el = document.createElement('div');
   el.className = 'msg ' + role;
@@ -2445,8 +2474,9 @@ async function send(text){
         // phrase is not. Only applied before any speech has been queued, so
         // the index bookkeeping below stays valid.
         if (spoken === 0) full = stripSourceLeak(full);
+        const follow = atBottom();     // sampled BEFORE the text grows
         el.textContent = stripMarkdown(full);
-        log.scrollTop = log.scrollHeight;
+        if (follow) log.scrollTop = log.scrollHeight;
         pulse(.4);
 
         // speak sentence by sentence; at ~13 tok/s waiting for the whole reply
@@ -2463,6 +2493,7 @@ async function send(text){
     }
 
     el.classList.remove('pending');
+    restAt(el);                        // long replies rest at their first line
     if (full.slice(spoken).trim()) queued = speak(full.slice(spoken)) || queued;
     el.textContent = stripMarkdown(full);
     history.push({ role:'assistant', content: full });
