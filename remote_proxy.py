@@ -20,8 +20,10 @@ OFFLINE IS THE DEFAULT, NOT THE FALLBACK. Orb is a search-and-rescue device:
 local answers everything unless the user deliberately picks otherwise, and any
 remote failure lands straight back on local rather than surfacing an error.
 """
+import bisect
 import datetime
 import json
+import math
 import os
 import pathlib
 import re
@@ -447,6 +449,94 @@ async def chat(request):
     return web.json_response(out)
 
 
+# --- offline place lookup ---------------------------------------------------
+# "Where am I" answered as a grid reference is right for a radio and useless for
+# everything else. This turns a fix into something a person can picture, with no
+# network: GeoNames GB, populated places plus the named high ground people
+# actually navigate by, 62k entries in 2.5 MB.
+#
+# Deliberately not a street-address geocoder. Reverse geocoding to a house
+# number needs either a network round trip to someone else's server (exactly
+# what a search-and-rescue device cannot rely on) or a full OSM extract and a
+# PostGIS instance, which this box has neither the disk nor the RAM for. A
+# named place with a distance and a bearing is more useful in the field anyway:
+# "600 m north-east of Seathwaite" can be walked to; a postcode cannot.
+PLACES_FILE = pathlib.Path(os.environ.get("PLACES_FILE", "/data/places.json"))
+_places = []          # [name, lat, lon, population, feature] sorted by lat
+_lats = []            # just the latitudes, so bisect has something to compare
+
+
+def load_places():
+    global _places, _lats
+    try:
+        _places = json.loads(PLACES_FILE.read_text(encoding="utf-8"))
+        # A parallel array of latitudes is not redundancy — bisect on the rows
+        # themselves compares whole lists starting at the NAME, so it returned
+        # index 0 every time and quietly scanned all 62k entries per lookup.
+        _lats = [row[1] for row in _places]
+    except Exception:
+        _places, _lats = [], []
+
+
+def _haversine(lat1, lon1, lat2, lon2):
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _bearing(lat1, lon1, lat2, lon2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def nearest_places(lat, lon, min_pop=0, span_deg=0.35):
+    """Nearest entry to a point, searched within a latitude band.
+
+    The list is sorted by latitude, so bisect narrows 62k candidates to a few
+    hundred before any trigonometry runs. Without that this is 62k haversines
+    per fix, twice, on a CPU already shared with the model.
+    """
+    if not _places:
+        return None
+    lo = bisect.bisect_left(_lats, lat - span_deg)
+    hi = bisect.bisect_right(_lats, lat + span_deg)
+    best, best_d = None, None
+    for row in _places[lo:hi]:
+        if row[3] < min_pop:
+            continue
+        d = _haversine(lat, lon, row[1], row[2])
+        if best_d is None or d < best_d:
+            best, best_d = row, d
+    if best is None:
+        return None
+    return {"name": best[0], "population": best[3], "feature": best[4],
+            "distance_m": round(best_d), "bearing": round(_bearing(lat, lon, best[1], best[2]))}
+
+
+async def place(request):
+    """lat/lon -> the nearest named place, and the nearest sizeable town."""
+    try:
+        lat = float(request.query["lat"])
+        lon = float(request.query["lon"])
+    except Exception:
+        return web.json_response({"error": "lat and lon required"}, status=400)
+    near = nearest_places(lat, lon)
+    # A second, wider search for somewhere recognisable. The nearest hamlet may
+    # mean nothing to the person on the other end of the radio; the nearest town
+    # usually does.
+    town = nearest_places(lat, lon, min_pop=2000, span_deg=0.9)
+    if town and near and town["name"] == near["name"]:
+        town = None
+    return web.json_response({"nearest": near, "town": town,
+                              "places_loaded": len(_places)})
+
+
 async def diag(request):
     """One-line-per-event diagnostic sink for the page.
 
@@ -502,9 +592,11 @@ app.add_routes([
     web.post("/v1/chat/completions", chat),
     web.get("/agents", agents),
     web.post("/diag", diag),
+    web.get("/place", place),
 ])
 
 if __name__ == "__main__":
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     load_recall()          # previous remote answers are free to serve offline
+    load_places()          # offline place names for turning a fix into words
     web.run_app(app, host="0.0.0.0", port=5003, print=None)

@@ -113,15 +113,22 @@ services:
       # Past this, fall back to local rather than leave the user watching a
       # dead orb. Hosted 70Bs answer in seconds; 60s means something is wrong.
       - REMOTE_TIMEOUT=60
+      # GeoNames GB: 62k populated places and named high ground, 2.5 MB.
+      # Turns a fix into words offline, which a street-address geocoder cannot
+      # do without either a network round trip or a PostGIS instance.
+      - PLACES_FILE=/data/places.json
     volumes:
       - ./logs:/logs
       - ./keys:/run/keys:ro
+      - ./data:/data:ro
     depends_on:
       - llama
     deploy:
       resources:
         limits:
-          memory: 128m
+          # Raised from 128m: the place list is held in memory so a lookup is
+          # a bisect and a few hundred haversines rather than a file read.
+          memory: 256m
 
   # Offline full English Wikipedia (~50 GB, no images). Costs disk, not RAM —
   # kiwix-serve mmaps the archive, so a 50 GB dump is barely dearer in memory

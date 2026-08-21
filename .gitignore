@@ -10,6 +10,9 @@ logs/
 # Server-side memory store: facts about the user, injected into prompts.
 mem/
 
+# Generated place dataset (2.5 MB, rebuilt by build_places.sh from GeoNames).
+data/
+
 # Offline archives. wikipedia_en_full.zim alone is ~50 GB; these are downloaded
 # on the host, never version-controlled.
 zim/

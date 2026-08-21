@@ -1677,14 +1677,50 @@ function geoFailure(e){
   return 'No position available.';
 }
 
+/* Nearest named place, from the offline dataset on the server. Not a street
+   address: reverse geocoding to a house number needs either someone else's
+   server (which is exactly what cannot be relied on out here) or a full OSM
+   extract this box has no room for. "600 metres north-east of Seathwaite" can
+   be walked to, which a postcode cannot. */
+let placeLast = null;
+
+async function lookupPlace(f){
+  try {
+    const r = await fetch('/place?lat=' + f.lat + '&lon=' + f.lon, { cache:'no-store' });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j.nearest ? j : null;
+  } catch { return null; }
+}
+
+// The lookup returns the bearing FROM the fix TO the place. Saying "you are
+// north of X" needs the opposite, or every direction is reported backwards.
+function relativeTo(p){
+  const back = (p.bearing + 180) % 360;
+  const dir = COMPASS[Math.round(back/45) % 8];
+  return p.distance_m < 100 ? 'at ' + p.name
+                            : niceDist(p.distance_m) + ' ' + dir + ' of ' + p.name;
+}
+
 async function describePosition(){
   const f = await getPosition();
   const g = gridRef(f.lat, f.lon);
-  const acc = f.acc ? ', accurate to about ' + Math.round(f.acc) + ' metres' : '';
-  const alt = (f.alt != null && isFinite(f.alt)) ? ', elevation ' + Math.round(f.alt) + ' metres' : '';
-  return g
-    ? 'Grid ' + sayGrid(g) + acc + alt + '. Decimal ' + f.lat.toFixed(5) + ', ' + f.lon.toFixed(5) + '.'
-    : 'Outside the British grid. Decimal ' + f.lat.toFixed(5) + ', ' + f.lon.toFixed(5) + acc + alt + '.';
+  placeLast = await lookupPlace(f);
+
+  const bits = [];
+  if (placeLast){
+    let s = 'You are ' + relativeTo(placeLast.nearest);
+    if (placeLast.town) s += ', ' + relativeTo(placeLast.town);
+    bits.push(s + '.');
+  }
+  if (g) bits.push('Grid ' + sayGrid(g) + '.');
+  if (!placeLast && !g) bits.push('Decimal ' + f.lat.toFixed(5) + ', ' + f.lon.toFixed(5) + '.');
+
+  const extra = [];
+  if (f.acc) extra.push('accurate to about ' + Math.round(f.acc) + ' metres');
+  if (f.alt != null && isFinite(f.alt)) extra.push('elevation ' + Math.round(f.alt) + ' metres');
+  if (extra.length) bits.push(extra.join(', ') + '.');
+  return bits.join(' ');
 }
 
 /* --- deterministic command handling, before the model ever sees it --- */
@@ -1805,8 +1841,10 @@ async function memHandleCommand(text){
       const f = await getPosition(0);          // a pin deserves a fresh fix
       localStorage.setItem(GEO_PIN, JSON.stringify(f));
       const g = gridRef(f.lat, f.lon);
-      msg = g ? 'Marked at grid ' + sayGrid(g) + '. Say "back to pin" for a bearing.'
-              : 'Marked at ' + f.lat.toFixed(5) + ', ' + f.lon.toFixed(5) + '.';
+      const p = await lookupPlace(f);
+      const where = p ? 'Marked ' + relativeTo(p.nearest) : 'Marked';
+      msg = where + (g ? ', grid ' + sayGrid(g) : '')
+          + '. Say "back to pin" for a bearing.';
     } catch (e) { msg = geoFailure(e); }
     bubble('bot', msg); speak(msg);
     setState('idle', idleHint());
@@ -1923,19 +1961,25 @@ function renderGeo(){
     return;
   }
   const age = Date.now() - geoLast.at;
-  const g = gridRef(geoLast.lat, geoLast.lon);
   const ageTxt = age < 60000 ? 'now'
                : age < 3600000 ? Math.round(age/60000) + 'm'
                : Math.round(age/3600000) + 'h';
-  geoChip.textContent = (g || geoLast.lat.toFixed(4) + ',' + geoLast.lon.toFixed(4))
-                      + ' · ' + ageTxt;
+  const near = placeLast && placeLast.nearest;
+  const where = near
+    ? (near.distance_m < 100 ? near.name : 'nr ' + near.name)
+    : (gridRef(geoLast.lat, geoLast.lon)
+       || geoLast.lat.toFixed(4) + ',' + geoLast.lon.toFixed(4));
+  geoChip.textContent = where + ' · ' + ageTxt;
   geoChip.classList.toggle('stale', age > 300000);
 }
 
 async function refreshGeo(){
   geoChip.classList.add('fixing');
   geoChip.textContent = 'fixing…';
-  try { await getPosition(0); }
+  try {
+    const f = await getPosition(0);
+    placeLast = await lookupPlace(f);
+  }
   catch (e){
     geoChip.textContent = !window.isSecureContext ? 'needs https'
                         : (e && e.code === 1) ? 'blocked' : 'no fix';
@@ -2514,7 +2558,10 @@ if (MODE === 'webspeech'){
   const origOnError = recog.onerror;
   recog.onerror = (e) => {
     sawError = true;
-    diag('error', { error: e.error, ms: Date.now() - startedAtMs });
+    // startedAtMs is 0 when the error beats onstart, which is exactly the
+    // interesting case — reporting Date.now() there logged an epoch timestamp
+    // dressed up as a duration.
+    diag('error', { error: e.error, ms: startedAtMs ? Date.now() - startedAtMs : null });
     origOnError(e);
   };
 
@@ -2524,7 +2571,7 @@ if (MODE === 'webspeech'){
     if (busy) return;
 
     const ranFor = Date.now() - startedAtMs;
-    diag('end', { ms: ranFor, error: sawError ? 'see-earlier' :
+    diag('end', { ms: startedAtMs ? ranFor : null, error: sawError ? 'see-earlier' :
                   (sawAnyResult ? 'had-result' : 'silent') });
     if (!sawAnyResult && !sawError && ranFor < 900){
       // Died on arrival. Report the cause rather than "tap to speak" again,
