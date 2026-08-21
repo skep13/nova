@@ -151,6 +151,32 @@ body.thinking .bloom{animation:think 1.8s ease-in-out infinite}
   min-height:18px;padding:11px 12px 0;
   max-width:100%;
 }
+
+/* ---------- glanceable state ----------
+   Sits under the orb in space the left pane already had spare. Deliberately
+   quiet: it must be readable at a glance without competing with the orb, which
+   is the thing you aim at. */
+.glance{
+  display:flex;gap:8px;align-items:center;justify-content:center;
+  flex-wrap:wrap;padding:10px 8px 0;max-width:100%;
+}
+.chip{
+  font:inherit;font-size:11px;letter-spacing:.08em;
+  color:var(--ink-dim);
+  background:rgba(255,255,255,.05);
+  border:1px solid var(--edge);border-radius:999px;
+  padding:4px 10px;
+  cursor:pointer;touch-action:manipulation;
+  white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;
+  transition:color .15s,border-color .15s,background .15s;
+}
+.chip:active{background:rgba(79,195,255,.18)}
+/* Lit only when a REMOTE model is answering — local is the default and the
+   quiet state, matching the rail button. */
+.chip.remote{color:#bfe7ff;border-color:rgba(79,195,255,.45);background:rgba(79,195,255,.12)}
+/* A stale fix is worse than no fix if you cannot tell it is stale. */
+.chip.geo.stale{opacity:.55}
+.chip.geo.fixing{color:var(--cyan)}
 body.listening .status{
   color:var(--cyan);text-transform:none;letter-spacing:.01em;font-size:14.5px;
 }
@@ -292,6 +318,15 @@ html.dimmed .dim{opacity:.92;pointer-events:auto}
       <div class="pip"></div>
     </div>
     <div class="status" id="status">tap to speak</div>
+
+    <!-- Glanceable state. Both of these were previously only answerable by
+         tapping something and waiting: which brain is replying, and where you
+         are. On a wrist the whole value is not having to interact to find out.
+         Stopping propagation matters — the entire left pane is the mic. -->
+    <div class="glance">
+      <button class="chip" id="agentChip" aria-label="Model in use, tap to change">local</button>
+      <button class="chip geo" id="geoChip" aria-label="Position, tap for a fix">position</button>
+    </div>
   </div>
 
   <div class="mid">
@@ -346,6 +381,8 @@ const composer= document.getElementById('composer');
 const kbBtn   = document.getElementById('kbBtn');
 const wikiBtn = document.getElementById('wikiBtn');
 const agentBtn = document.getElementById('agentBtn');
+const agentChip = document.getElementById('agentChip');
+const geoChip = document.getElementById('geoChip');
 const clearBtn = document.getElementById('clearBtn');
 const newBtn = document.getElementById('newBtn');
 const ttsBtn  = document.getElementById('ttsBtn');
@@ -1865,6 +1902,48 @@ function applyAgent(){
   agentBtn.classList.toggle('on', remote);
   agentBtn.classList.toggle('muted', !remote);
   agentBtn.setAttribute('aria-label', 'Model: ' + a.label);
+
+  // The chip carries the model, not just the label — "is it still the local
+  // one?" is the question, and a friendly name alone does not answer it.
+  const short = (a.model || '').split('/').pop().replace(/-GGUF.*$/i, '')
+                               .replace(/-Instruct$/i, '');
+  agentChip.textContent = short ? a.label + ' · ' + short : a.label;
+  agentChip.classList.toggle('remote', remote);
+  agentChip.setAttribute('aria-label', 'Model: ' + a.label + (short ? ', ' + short : '') + '. Tap to change.');
+}
+
+/* Position, shown rather than asked for. Never polls: a background fix loop on
+   a wrist device with the screen pinned on is a battery problem, and a stale
+   reading presented as current is worse than none. So it shows the age of what
+   it has and refreshes only when tapped. */
+function renderGeo(){
+  if (!geoLast){
+    geoChip.textContent = navigator.geolocation ? 'position' : 'no gps';
+    geoChip.classList.remove('stale');
+    return;
+  }
+  const age = Date.now() - geoLast.at;
+  const g = gridRef(geoLast.lat, geoLast.lon);
+  const ageTxt = age < 60000 ? 'now'
+               : age < 3600000 ? Math.round(age/60000) + 'm'
+               : Math.round(age/3600000) + 'h';
+  geoChip.textContent = (g || geoLast.lat.toFixed(4) + ',' + geoLast.lon.toFixed(4))
+                      + ' · ' + ageTxt;
+  geoChip.classList.toggle('stale', age > 300000);
+}
+
+async function refreshGeo(){
+  geoChip.classList.add('fixing');
+  geoChip.textContent = 'fixing…';
+  try { await getPosition(0); }
+  catch (e){
+    geoChip.textContent = !window.isSecureContext ? 'needs https'
+                        : (e && e.code === 1) ? 'blocked' : 'no fix';
+    geoChip.classList.remove('fixing');
+    return;
+  }
+  geoChip.classList.remove('fixing');
+  renderGeo();
 }
 
 
@@ -2691,6 +2770,9 @@ agentBtn.addEventListener('click', () => {
   setTimeout(() => { if (!busy && !listening) statusEl.textContent = idleHint(); }, 2200);
 });
 
+agentChip.addEventListener('click', (e) => { e.stopPropagation(); agentBtn.click(); });
+geoChip.addEventListener('click', (e) => { e.stopPropagation(); refreshGeo(); });
+
 kbBtn.addEventListener('click', () => {
   unlockTTS(); poke();
   showComposer(!composer.classList.contains('show'));
@@ -2744,6 +2826,8 @@ memLoad();                          // durable facts about the user
 timersRestore();                    // timers survive the app being torn down
 applySpeakPref();                   // reflect the remembered voice/text choice
 probeWiki();                        // is the offline archive actually there?
+renderGeo();                        // show any fix carried over from earlier
+setInterval(renderGeo, 30000);      // ages the reading; does NOT take a fix
 probeAgents();                      // which backends have keys installed?
 poke();
 ping();                             // also warms the model connection
