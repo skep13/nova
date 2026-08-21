@@ -117,6 +117,19 @@ services:
       # Turns a fix into words offline, which a street-address geocoder cannot
       # do without either a network round trip or a PostGIS instance.
       - PLACES_FILE=/data/places.json
+      # Street addresses via OpenStreetMap's Nominatim, when there is signal.
+      # Purely additive: the offline place name is computed first and returned
+      # regardless, so this can never delay or block an answer.
+      #
+      # It does send coordinates to a third party. Set GEOCODE_ONLINE=0 to turn
+      # that off entirely and stay on offline place names only — everything
+      # already resolved stays cached and keeps working.
+      - GEOCODE_ONLINE=1
+      - GEOCODE_TIMEOUT=4
+      # Nominatim's usage policy requires an identifying User-Agent and no more
+      # than one request a second. Both are enforced in the router rather than
+      # trusted to the browser.
+      - GEOCODE_UA=Orb/1.0 (self-hosted personal assistant)
     volumes:
       - ./logs:/logs
       - ./keys:/run/keys:ro

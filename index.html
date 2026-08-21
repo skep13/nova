@@ -1708,7 +1708,12 @@ async function describePosition(){
   placeLast = await lookupPlace(f);
 
   const bits = [];
-  if (placeLast){
+  if (placeLast && placeLast.address){
+    // A street address supersedes the nearest-place phrasing — it already
+    // carries the locality, so repeating "600 m west of X" only pads it. The
+    // town stays out for the same reason.
+    bits.push('You are at ' + placeLast.address + '.');
+  } else if (placeLast){
     let s = 'You are ' + relativeTo(placeLast.nearest);
     if (placeLast.town) s += ', ' + relativeTo(placeLast.town);
     bits.push(s + '.');
@@ -1842,7 +1847,8 @@ async function memHandleCommand(text){
       localStorage.setItem(GEO_PIN, JSON.stringify(f));
       const g = gridRef(f.lat, f.lon);
       const p = await lookupPlace(f);
-      const where = p ? 'Marked ' + relativeTo(p.nearest) : 'Marked';
+      const where = p && p.address ? 'Marked at ' + p.address
+                  : p ? 'Marked ' + relativeTo(p.nearest) : 'Marked';
       msg = where + (g ? ', grid ' + sayGrid(g) : '')
           + '. Say "back to pin" for a bearing.';
     } catch (e) { msg = geoFailure(e); }
@@ -1965,10 +1971,15 @@ function renderGeo(){
                : age < 3600000 ? Math.round(age/60000) + 'm'
                : Math.round(age/3600000) + 'h';
   const near = placeLast && placeLast.nearest;
-  const where = near
-    ? (near.distance_m < 100 ? near.name : 'nr ' + near.name)
-    : (gridRef(geoLast.lat, geoLast.lon)
-       || geoLast.lat.toFixed(4) + ',' + geoLast.lon.toFixed(4));
+  // The chip has room for about one phrase. An address's first two parts are
+  // the useful ones ("Folly Bridge, Seatoller"); the postcode is not what you
+  // read at a glance.
+  const addr = placeLast && placeLast.address
+    ? placeLast.address.split(',').slice(0, 2).join(',').trim() : null;
+  const where = addr
+    || (near ? (near.distance_m < 100 ? near.name : 'nr ' + near.name)
+             : (gridRef(geoLast.lat, geoLast.lon)
+                || geoLast.lat.toFixed(4) + ',' + geoLast.lon.toFixed(4)));
   geoChip.textContent = where + ' · ' + ageTxt;
   geoChip.classList.toggle('stale', age > 300000);
 }

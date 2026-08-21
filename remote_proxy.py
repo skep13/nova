@@ -519,6 +519,90 @@ def nearest_places(lat, lon, min_pop=0, span_deg=0.35):
             "distance_m": round(best_d), "bearing": round(_bearing(lat, lon, best[1], best[2]))}
 
 
+# --- online reverse geocoding ------------------------------------------------
+# A real street address, when and only when there is signal. Strictly an
+# enhancement: the offline place name is computed first and returned regardless,
+# so nothing here can ever delay or block an answer. If the network is slow,
+# absent, or the service is unhappy, the reply is simply the offline one.
+#
+# Server-side rather than in the page for three reasons: Nominatim's usage
+# policy requires an identifying User-Agent and at most one request a second,
+# neither of which a browser tab can be trusted to honour; the cache is shared
+# across devices; and it keeps the page free of a cross-origin dependency.
+#
+# NOTE: this sends the device's coordinates to a third party. That is the whole
+# trade for a street address, and it is why it is additive rather than the
+# default — the offline path never leaves the machine.
+NOMINATIM = "https://nominatim.openstreetmap.org/reverse"
+GEOCODE_UA = os.environ.get("GEOCODE_UA", "Orb/1.0 (self-hosted personal assistant)")
+GEOCODE_ENABLED = os.environ.get("GEOCODE_ONLINE", "1") not in ("0", "false", "")
+GEOCODE_TIMEOUT = float(os.environ.get("GEOCODE_TIMEOUT", "4"))
+ADDR_FILE = LOG_DIR / "addresses.json"
+
+_addr_cache = {}          # "lat,lon" rounded -> address string
+_addr_last_call = 0.0     # monotonic, for the one-per-second policy limit
+
+
+def addr_key(lat, lon):
+    # ~11 m of resolution. Finer would cache a new entry for every GPS jitter
+    # and never hit; coarser would report the wrong side of a street.
+    return f"{round(lat, 4)},{round(lon, 4)}"
+
+
+def load_addresses():
+    global _addr_cache
+    try:
+        _addr_cache = json.loads(ADDR_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        _addr_cache = {}
+
+
+def save_addresses():
+    try:
+        ADDR_FILE.write_text(json.dumps(_addr_cache), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def tidy_address(js):
+    """Nominatim's display_name is a paragraph. Take the part a person says."""
+    a = (js or {}).get("address") or {}
+    street = " ".join(x for x in (a.get("house_number"), a.get("road")) if x)
+    area = next((a[k] for k in ("village", "hamlet", "suburb", "town", "city",
+                                "county") if a.get(k)), None)
+    parts = [p for p in (street or None, area, a.get("postcode")) if p]
+    return ", ".join(parts) or (js or {}).get("display_name")
+
+
+async def reverse_geocode(lat, lon):
+    """Street address, or None. Never raises, never blocks the offline answer."""
+    global _addr_last_call
+    key = addr_key(lat, lon)
+    if key in _addr_cache:
+        return _addr_cache[key]          # already known: works with no signal
+    if not GEOCODE_ENABLED:
+        return None
+    if time.monotonic() - _addr_last_call < 1.1:
+        return None                      # policy is 1/sec; skip rather than delay
+    _addr_last_call = time.monotonic()
+    try:
+        params = {"lat": lat, "lon": lon, "format": "jsonv2", "zoom": "18",
+                  "addressdetails": "1"}
+        timeout = aiohttp.ClientTimeout(total=GEOCODE_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get(NOMINATIM, params=params,
+                                headers={"User-Agent": GEOCODE_UA}) as r:
+                if r.status != 200:
+                    return None
+                addr = tidy_address(await r.json())
+    except Exception:
+        return None                      # no signal is the expected case here
+    if addr:
+        _addr_cache[key] = addr
+        save_addresses()                 # so it resolves offline next time
+    return addr
+
+
 async def place(request):
     """lat/lon -> the nearest named place, and the nearest sizeable town."""
     try:
@@ -533,8 +617,11 @@ async def place(request):
     town = nearest_places(lat, lon, min_pop=2000, span_deg=0.9)
     if town and near and town["name"] == near["name"]:
         town = None
-    return web.json_response({"nearest": near, "town": town,
-                              "places_loaded": len(_places)})
+    # Computed AFTER the offline result, and allowed to fail silently.
+    address = await reverse_geocode(lat, lon)
+    return web.json_response({"nearest": near, "town": town, "address": address,
+                              "places_loaded": len(_places),
+                              "addresses_cached": len(_addr_cache)})
 
 
 async def diag(request):
@@ -599,4 +686,5 @@ if __name__ == "__main__":
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     load_recall()          # previous remote answers are free to serve offline
     load_places()          # offline place names for turning a fix into words
+    load_addresses()       # street addresses resolved before now work offline
     web.run_app(app, host="0.0.0.0", port=5003, print=None)
