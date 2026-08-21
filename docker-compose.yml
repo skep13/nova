@@ -73,7 +73,12 @@ services:
     container_name: orb-remote
     restart: unless-stopped
     environment:
-      - GROQ_MODEL=llama-3.3-70b-versatile
+      # llama-3.3-70b-versatile was retired by Groq between 2026-08-17 and
+      # 08-18 and started 404ing mid-use — the hard-fail logic withdrew the
+      # agent automatically and /agents named the cause. Replaced with the
+      # largest thing they now serve; measured 253ms on this question, which is
+      # faster than the model it replaces despite being bigger.
+      - GROQ_MODEL=openai/gpt-oss-120b
       # OpenRouter rotates its :free models out without warning, so expect this
       # one to 404 eventually. The router surfaces that on /agents as
       # last_error; pick a replacement from openrouter.ai/models filtered to

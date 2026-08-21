@@ -200,12 +200,64 @@ def log_exchange(question, answer, agent_name, model):
             "---\n"
             f"created: {now.isoformat(timespec='seconds')}\n"
             f"agent: {agent_name}\n"
-            f"model: {model or 'qwen2.5-1.5b'}\n"
+            f"model: {model or 'unknown'}\n"
             "---\n\n"
             f"# {question.strip()[:200]}\n\n{answer.strip()}\n",
             encoding="utf-8")
+        if agent_name not in ("local", "recall"):
+            _recall[recall_key(question)] = (answer.strip(), agent_name, model)
     except Exception:
         pass                                # logging must never break a reply
+
+
+# --- recall: the log corpus, read back --------------------------------------
+# Logging was always meant to outlive the thing that produced it — the point of
+# recording every exchange was that the good answers stay available once the
+# network, or the paid key, is gone. The read path lived in the Anthropic proxy
+# and was deleted along with it, so for a while this was a write-only archive.
+#
+# Only answers from REMOTE agents are recalled. Replaying a local answer saves
+# nothing (the model is right there and will happily regenerate it) and risks
+# serving something staler than what the model would say now. A Groq answer
+# recorded at home, replayed on a hillside with no signal, is the whole idea.
+_recall = {}
+
+# Filler carries no meaning but stops "what is the capital of France" matching
+# "whats the capital of france". Word ORDER is preserved deliberately: sorting
+# the terms would collide "is a raven bigger than a crow" with its reverse, and
+# a confidently wrong recalled answer is far worse than regenerating one.
+_FILLER = re.compile(
+    r"\b(?:the|a|an|is|are|was|were|do|does|did|of|to|for|in|on|at|it|its|"
+    r"please|can|could|you|your|me|my|i|whats|what|tell|about)\b")
+
+
+def recall_key(q):
+    q = re.sub(r"[^a-z0-9 ]+", " ", (q or "").lower())
+    return " ".join(_FILLER.sub(" ", q).split())
+
+
+def load_recall():
+    """Rebuild the cache from disk at startup, so it survives a restart."""
+    if not LOG_DIR.exists():
+        return
+    for p in sorted(LOG_DIR.rglob("*.md")):          # oldest first: newest wins
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+            head, _, body = txt.partition("\n---\n\n")
+            agent = re.search(r"^agent: (.+)$", head, re.M)
+            model = re.search(r"^model: (.+)$", head, re.M)
+            if not agent or agent.group(1).strip() in ("local", "recall"):
+                continue
+            q = re.search(r"^# (.+)$", body, re.M)
+            if not q:
+                continue
+            answer = body.split(q.group(0), 1)[-1].strip()
+            if answer:
+                _recall[recall_key(q.group(1))] = (
+                    answer, agent.group(1).strip(),
+                    model.group(1).strip() if model else "")
+        except Exception:
+            pass
 
 
 # --- request shaping --------------------------------------------------------
@@ -321,6 +373,27 @@ async def chat(request):
                                        "X-Accel-Buffering": "no"})
     collected = []
 
+    # Recall runs only on the LOCAL path — i.e. offline, or by choice. If a
+    # remote agent is selected and reachable, it answers fresh; replaying an
+    # old answer over a working network would be a downgrade, not a saving.
+    if agent["name"] == "local" and question:
+        hit = _recall.get(recall_key(question))
+        if hit:
+            answer, src_agent, src_model = hit
+            # Logged under its own agent name so the record stays honest about
+            # where the words came from and that they were not regenerated.
+            log_exchange(question, answer, "recall", f"{src_agent}/{src_model}")
+            if stream:
+                await resp.prepare(request)
+                await resp.write(("data: " + json.dumps(
+                    {"choices": [{"index": 0, "delta": {"content": answer}}]}) + "\n\n").encode())
+                await resp.write(b"data: [DONE]\n\n")
+                return resp
+            return web.json_response({
+                "model": f"recall:{src_model}",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": answer}}]})
+
     if agent["name"] != "local":
         key = read_key(agent["name"])
         body = remote_payload(agent, payload)
@@ -420,6 +493,7 @@ async def agents(request):
         } for a in AGENTS],
         "history_turns": HISTORY_TURNS,
         "max_tokens": MAX_TOKENS,
+        "recalled_answers": len(_recall),
     })
 
 
@@ -432,4 +506,5 @@ app.add_routes([
 
 if __name__ == "__main__":
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    load_recall()          # previous remote answers are free to serve offline
     web.run_app(app, host="0.0.0.0", port=5003, print=None)

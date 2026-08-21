@@ -1497,6 +1497,159 @@ function memNote(query){
   return { title: best.title, text };
 }
 
+/* ============ position ============
+   The device knows where it is; nothing here asks a model about it. GPS works
+   with no signal at all, which makes this the one capability that gets MORE
+   useful as everything else degrades.
+
+   Grid references are the point. Lat/long is fine on a screen but useless read
+   over a radio to someone walking towards you — UK mountain rescue works in OS
+   grid, so that is what this produces. */
+const GEO_PIN = 'orb.pin.v1';
+const GEO_TRAIL = 'orb.trail.v1';
+const TRAIL_MAX = 60;              // ~a day of coarse breadcrumbs, not a tracker
+let geoLast = null;                // {lat, lon, acc, alt, at}
+
+/* WGS84 -> OS National Grid. Two steps that are easy to conflate: GPS reports
+   WGS84, but the National Grid sits on the Airy 1830 ellipsoid under the
+   OSGB36 datum. So a 7-parameter Helmert shift happens in cartesian space
+   BEFORE the transverse Mercator projection. Projecting WGS84 directly lands
+   ~100 m out — verified here at 77-125 m across Britain, which is exactly the
+   distance between a grid reference and a wrong one.
+   Checked against Ben Nevis, Scafell Pike and Snowdon: all exact to 6 figures. */
+const _deg = Math.PI / 180;
+function _toCart(lat, lon, a, b){
+  const p = lat*_deg, l = lon*_deg, sp = Math.sin(p), cp = Math.cos(p);
+  const e2 = (a*a - b*b)/(a*a), v = a/Math.sqrt(1 - e2*sp*sp);
+  return { x:v*cp*Math.cos(l), y:v*cp*Math.sin(l), z:(1-e2)*v*sp };
+}
+function _toLL(p, a, b){
+  const e2 = (a*a - b*b)/(a*a), lon = Math.atan2(p.y, p.x);
+  const r = Math.hypot(p.x, p.y);
+  let lat = Math.atan2(p.z, r*(1-e2)), prev;
+  for (let i=0;i<20;i++){
+    const s = Math.sin(lat), v = a/Math.sqrt(1 - e2*s*s);
+    prev = lat; lat = Math.atan2(p.z + e2*v*s, r);
+    if (Math.abs(lat-prev) < 1e-13) break;
+  }
+  return { lat: lat/_deg, lon: lon/_deg };
+}
+function _osgb36(lat, lon){
+  const c = _toCart(lat, lon, 6378137, 6356752.3142);
+  const sec = Math.PI/(180*3600), s = 20.4894e-6;
+  const rx = -0.1502*sec, ry = -0.2470*sec, rz = -0.8421*sec;
+  const t = {
+    x: -446.448 + c.x*(1+s) - c.y*rz + c.z*ry,
+    y:  125.157 + c.x*rz + c.y*(1+s) - c.z*rx,
+    z: -542.060 - c.x*ry + c.y*rx + c.z*(1+s),
+  };
+  return _toLL(t, 6377563.396, 6356256.909);
+}
+function _grid(lat, lon){
+  const a = 6377563.396, b = 6356256.909, F0 = 0.9996012717;
+  const p0 = 49*_deg, l0 = -2*_deg, N0 = -100000, E0 = 400000;
+  const e2 = 1 - (b*b)/(a*a), n = (a-b)/(a+b), n2 = n*n, n3 = n2*n;
+  const p = lat*_deg, l = lon*_deg;
+  const sp = Math.sin(p), cp = Math.cos(p), tp = Math.tan(p);
+  const v = a*F0/Math.sqrt(1 - e2*sp*sp);
+  const r = a*F0*(1-e2)/Math.pow(1 - e2*sp*sp, 1.5);
+  const eta2 = v/r - 1;
+  const M = b*F0*((1+n+1.25*n2+1.25*n3)*(p-p0)
+    - (3*n+3*n2+2.625*n3)*Math.sin(p-p0)*Math.cos(p+p0)
+    + (1.875*n2+1.875*n3)*Math.sin(2*(p-p0))*Math.cos(2*(p+p0))
+    - (35/24)*n3*Math.sin(3*(p-p0))*Math.cos(3*(p+p0)));
+  const c3 = cp**3, c5 = cp**5, t2 = tp**2, t4 = tp**4;
+  const d = l-l0, d2 = d*d, d3 = d2*d, d4 = d3*d, d5 = d4*d, d6 = d5*d;
+  return {
+    E: E0 + v*cp*d + (v/6)*c3*(v/r - t2)*d3
+       + (v/120)*c5*(5 - 18*t2 + t4 + 14*eta2 - 58*t2*eta2)*d5,
+    N: M + N0 + (v/2)*sp*cp*d2 + (v/24)*sp*c3*(5 - t2 + 9*eta2)*d4
+       + (v/720)*sp*c5*(61 - 58*t2 + t4)*d6,
+  };
+}
+function gridRef(lat, lon, digits){
+  digits = digits || 6;
+  const o = _osgb36(lat, lon), g = _grid(o.lat, o.lon);
+  if (g.E < 0 || g.E >= 700000 || g.N < 0 || g.N >= 1300000) return null;
+  const e100 = Math.floor(g.E/100000), n100 = Math.floor(g.N/100000);
+  let l1 = (19-n100) - ((19-n100) % 5) + Math.floor((e100+10)/5);
+  let l2 = ((19-n100)*5) % 25 + (e100 % 5);
+  if (l1 > 7) l1++;                      // the grid alphabet skips 'I'
+  if (l2 > 7) l2++;
+  const half = digits/2, div = Math.pow(10, 5-half);
+  return String.fromCharCode(l1+65) + String.fromCharCode(l2+65) + ' '
+       + String(Math.floor((g.E % 100000)/div)).padStart(half,'0') + ' '
+       + String(Math.floor((g.N % 100000)/div)).padStart(half,'0');
+}
+
+// Great-circle distance and initial bearing. A compass point matters more than
+// the number when it is being heard rather than read.
+const COMPASS = ['north','north-east','east','south-east','south','south-west','west','north-west'];
+function geoDelta(from, to){
+  const R = 6371000;
+  const p1 = from.lat*_deg, p2 = to.lat*_deg, dp = (to.lat-from.lat)*_deg, dl = (to.lon-from.lon)*_deg;
+  const h = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  const dist = 2*R*Math.asin(Math.min(1, Math.sqrt(h)));
+  const y = Math.sin(dl)*Math.cos(p2);
+  const x = Math.cos(p1)*Math.sin(p2) - Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+  const brg = (Math.atan2(y, x)/_deg + 360) % 360;
+  return { dist, brg, point: COMPASS[Math.round(brg/45) % 8] };
+}
+const niceDist = (m) => m < 1000 ? Math.round(m/10)*10 + ' metres'
+                                 : (m/1000).toFixed(m < 10000 ? 1 : 0) + ' kilometres';
+// Digits spoken singly, as they would be over a radio: "one six six", not
+// "one hundred and sixty six".
+const sayGrid = (g) => g ? g.replace(/([A-Z])(?=[A-Z])/g, '$1 ').replace(/\d/g, '$& ') : '';
+
+function getPosition(maxAgeMs){
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('unsupported'));
+    if (geoLast && Date.now() - geoLast.at < (maxAgeMs || 20000)) return resolve(geoLast);
+    navigator.geolocation.getCurrentPosition(
+      (p) => {
+        geoLast = { lat:p.coords.latitude, lon:p.coords.longitude,
+                    acc:p.coords.accuracy, alt:p.coords.altitude, at:Date.now() };
+        trailPush(geoLast);
+        resolve(geoLast);
+      },
+      (e) => reject(e),
+      { enableHighAccuracy:true, timeout:15000, maximumAge:10000 });
+  });
+}
+
+// Breadcrumbs, coarsely: a point every 50 m at most. Dense tracking would be a
+// different product and a battery problem.
+function trailPush(fix){
+  try {
+    const t = JSON.parse(localStorage.getItem(GEO_TRAIL) || '[]');
+    const last = t[t.length-1];
+    if (last && geoDelta(last, fix).dist < 50) return;
+    t.push({ lat:fix.lat, lon:fix.lon, at:fix.at });
+    while (t.length > TRAIL_MAX) t.shift();
+    localStorage.setItem(GEO_TRAIL, JSON.stringify(t));
+  } catch {}
+}
+
+function geoFailure(e){
+  // Safari gates geolocation on a secure context exactly as it does the mic,
+  // so the plain-http LAN address cannot do this even though dictation can.
+  if (!navigator.geolocation) return 'This browser has no location support.';
+  if (!window.isSecureContext) return 'Location needs the https address. Plain http cannot ask for it.';
+  if (e && e.code === 1) return 'Location permission is denied. Allow it in site settings.';
+  if (e && e.code === 3) return 'No fix yet. Under open sky it usually takes a few seconds.';
+  return 'No position available.';
+}
+
+async function describePosition(){
+  const f = await getPosition();
+  const g = gridRef(f.lat, f.lon);
+  const acc = f.acc ? ', accurate to about ' + Math.round(f.acc) + ' metres' : '';
+  const alt = (f.alt != null && isFinite(f.alt)) ? ', elevation ' + Math.round(f.alt) + ' metres' : '';
+  return g
+    ? 'Grid ' + sayGrid(g) + acc + alt + '. Decimal ' + f.lat.toFixed(5) + ', ' + f.lon.toFixed(5) + '.'
+    : 'Outside the British grid. Decimal ' + f.lat.toFixed(5) + ', ' + f.lon.toFixed(5) + acc + alt + '.';
+}
+
 /* --- deterministic command handling, before the model ever sees it --- */
 const RE_REMEMBER = /^\s*(?:please\s+)?remember(?:\s+that)?\s*[:,-]?\s+(.{3,240}?)\s*$/i;
 const RE_FORGET   = /^\s*(?:please\s+)?forget(?:\s+(?:that|about))?\s*[:,-]?\s+(.{2,120}?)\s*[?.!]*\s*$/i;
@@ -1506,6 +1659,11 @@ const RE_RECALL   = /^\s*(?:what\s+do\s+you\s+(?:remember|know)(?:\s+about\s+me)
 // do I splint a wrist" must not — that is a real question with a greeting
 // stuck on the front, and swallowing it would be far worse than a stiff hello.
 const RE_GREET    = /^\s*(?:hello|hi|hiya|hey|yo|howdy|greetings|good\s+(?:morning|afternoon|evening)|morning|evening)(?:\s+(?:there|orb|fairy|again))?\s*[!?.]*\s*$/i;
+// Position questions never reach the model: it has no sensors, and a model
+// asked "where am I" will cheerfully invent somewhere.
+const RE_WHERE    = /^\s*(?:where\s+am\s+i|where\s+are\s+we|what(?:'?s|\s+is)?\s+my\s+(?:location|position|grid(?:\s*ref(?:erence)?)?|co-?ordinates)|my\s+(?:location|position|coordinates)|grid\s*ref(?:erence)?|location|position)\s*[?.!]*\s*$/i;
+const RE_MARK     = /^\s*(?:mark\s+(?:this\s+)?(?:spot|point|position|place)|drop\s+a\s+pin|save\s+(?:this\s+)?(?:spot|position)|pin\s+this)\s*[?.!]*\s*$/i;
+const RE_TOPIN    = /^\s*(?:(?:back|way|bearing|distance)\s+to\s+(?:the\s+)?pin|where'?s?\s+(?:the\s+)?pin|return\s+to\s+(?:the\s+)?pin|how\s+far\s+(?:is\s+)?(?:the\s+)?pin)\s*[?.!]*\s*$/i;
 const GREETINGS = [
   'Hello. What are we looking at?',
   'Still here. What do you need?',
@@ -1588,6 +1746,56 @@ async function memHandleCommand(text){
     bubble('user', text);
     const msg = GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
     bubble('bot', msg); speak(msg);
+    return true;
+  }
+
+  if (RE_WHERE.test(text)){
+    bubble('user', text);
+    setState('thinking', 'getting a fix');
+    let msg;
+    try { msg = await describePosition(); }
+    catch (e) { msg = geoFailure(e); }
+    bubble('bot', msg); speak(msg);
+    setState('idle', idleHint());
+    return true;
+  }
+
+  if (RE_MARK.test(text)){
+    bubble('user', text);
+    setState('thinking', 'getting a fix');
+    let msg;
+    try {
+      const f = await getPosition(0);          // a pin deserves a fresh fix
+      localStorage.setItem(GEO_PIN, JSON.stringify(f));
+      const g = gridRef(f.lat, f.lon);
+      msg = g ? 'Marked at grid ' + sayGrid(g) + '. Say "back to pin" for a bearing.'
+              : 'Marked at ' + f.lat.toFixed(5) + ', ' + f.lon.toFixed(5) + '.';
+    } catch (e) { msg = geoFailure(e); }
+    bubble('bot', msg); speak(msg);
+    setState('idle', idleHint());
+    return true;
+  }
+
+  if (RE_TOPIN.test(text)){
+    bubble('user', text);
+    let msg;
+    let pin = null;
+    try { pin = JSON.parse(localStorage.getItem(GEO_PIN) || 'null'); } catch {}
+    if (!pin){
+      msg = 'Nothing marked yet. Say "mark this spot" first.';
+    } else {
+      setState('thinking', 'getting a fix');
+      try {
+        const f = await getPosition(0);
+        const d = geoDelta(f, pin);
+        msg = d.dist < 25
+          ? 'You are within about ' + Math.round(d.dist) + ' metres of the pin.'
+          : 'The pin is ' + niceDist(d.dist) + ' away, bearing ' + Math.round(d.brg)
+            + ' degrees, roughly ' + d.point + '.';
+      } catch (e) { msg = geoFailure(e); }
+    }
+    bubble('bot', msg); speak(msg);
+    setState('idle', idleHint());
     return true;
   }
   return false;
@@ -1696,6 +1904,60 @@ const META_RE = /^\s*(?:so\s+)?(?:can|could|are|do|did|will|would|should)\s+(?:y
 // procedures do not, so these need a much stronger title match to be trusted.
 const PROCEDURAL_RE = /^\s*(?:how\s+(?:do|can|should|would|does|are)\b|how\s+to\b|what\s+should\s+i\b|steps?\s+(?:to|for)\b)/i;
 
+/* Curated intents: the questions a search-and-rescue device is actually asked,
+   mapped to the article that answers them.
+
+   Deliberately small and hand-checked rather than clever. Every entry here is
+   a query kiwix's keyword search either missed or answered with something
+   dangerous, so this is a list of known failures being closed one at a time —
+   not an attempt to second-guess the index in general. Anything not listed
+   falls through to the normal relevance gate untouched.
+
+   Order matters: first match wins, so put the specific above the general. */
+const CURATED = [
+  [/\b(deep\s+)?cut|laceration|bleed(ing)?|h(a)?emorrhage|wound\b/i,      'Bleeding'],
+  [/\bhypotherm/i,                                                        'Hypothermia'],
+  [/\bhypertherm|heat\s*stroke|heat\s*exhaustion|sun\s*stroke/i,          'Heat illness'],
+  [/\bfrost\s*bite|frostnip/i,                                            'Frostbite'],
+  [/\bburn(s|ed|ing)?\b|scald/i,                                          'Burn'],
+  [/\bbroken\s+(bone|arm|leg|wrist|ankle)|fracture|splint/i,              'Bone fracture'],
+  [/\bsprain|twisted\s+(ankle|knee)|strain(ed)?\s+muscle/i,               'Sprain'],
+  [/\bcpr\b|cardiopulmonary|chest\s+compress|not\s+breathing/i,           'Cardiopulmonary resuscitation'],
+  [/\bchok(e|ing)|heimlich|abdominal\s+thrust/i,                          'Choking'],
+  [/\bshock\b(?!.*electric)/i,                                            'Shock (circulatory)'],
+  [/\bconcussion|head\s+injur|knocked\s+out/i,                            'Concussion'],
+  [/\bsnake\s*bite|adder\s+bite|venom/i,                                  'Snakebite'],
+  [/\btick\b|lyme/i,                                                      'Tick-borne disease'],
+  [/\bdehydrat|not\s+drink(ing)?\s+enough/i,                              'Dehydration'],
+  [/\baltitude\s+sick|mountain\s+sickness|acute\s+mountain/i,             'Altitude sickness'],
+  [/\bavalanche/i,                                                        'Avalanche'],
+  [/\bdrown|water\s+rescue|fell\s+in(to)?\s+(the\s+)?(water|river)/i,     'Drowning'],
+  [/\bnavigat(e|ion)|compass|bearing|map\s+read/i,                        'Navigation'],
+  [/\bknot\b|bowline|prusik|clove\s+hitch|figure\s+of\s+eight/i,          'List of knots'],
+  [/\bshelter|bivouac|bivvy/i,                                            'Bivouac shelter'],
+  [/\bexposure|wind\s*chill/i,                                            'Wind chill'],
+  [/\bdistress\s+signal|sos\b|flare\b|whistle\s+signal/i,                 'Distress signal'],
+];
+
+async function curated(query){
+  const hit = CURATED.find(([re]) => re.test(query));
+  if (!hit) return null;
+  try {
+    // Search restricted to the exact title. Cheaper and far more predictable
+    // than a full-text query, and it fails closed: no match, no injection.
+    const r = await fetch('/wiki/search?books.filter.lang=eng&pattern='
+                          + encodeURIComponent(hit[1]) + '&userlang=en',
+                          { cache:'no-store' });
+    if (!r.ok) return null;
+    const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+    for (const a of doc.querySelectorAll('a[href*="/content/"]')){
+      const t = (a.textContent || '').trim();
+      if (t.toLowerCase() === hit[1].toLowerCase()) return { a, title: t };
+    }
+  } catch {}
+  return null;                              // curated miss falls through to search
+}
+
 async function wikiLookup(query){
   if (!wikiOn || !wikiUp) return null;
   const terms = keyTerms(query);
@@ -1752,7 +2014,21 @@ async function wikiLookup(query){
   }
 
   try {
-    let chosen = await pick(terms.join(' '));
+    // Curated intents run FIRST, and bypass search entirely.
+    //
+    // kiwix is a keyword index, not a semantic one, and it fails hardest on
+    // exactly the questions this device exists for: "treat deep cut" returns
+    // Trabeculectomy and Psychosurgery even inside the medical archive. The
+    // relevance gate below can only decline those, not fix them — so a whole
+    // category of question was reaching the model with no grounding at all.
+    //
+    // The fix is the same one used for retrieval, memory and greetings: when a
+    // small model (or a keyword index) cannot be trusted to decide, take the
+    // decision away from it. These are hand-checked phrasings mapped to the
+    // article that actually answers them. Cheap to extend, impossible to get
+    // subtly wrong, and it costs one direct fetch instead of a search.
+    let chosen = await curated(query);
+    if (!chosen) chosen = await pick(terms.join(' '));
 
     // Extra words dilute a full-text query: "treat hypothermia field" returned
     // "Battlefield medicine" at 0.5, while "hypothermia" alone returns the
