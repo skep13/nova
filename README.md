@@ -1,6 +1,6 @@
 # Orb
 
-Voice chat UI for a local 1.5B model on a ThinkPad T470 (Proxmox, 4 GB RAM,
+Voice chat UI for a local 3B model on a ThinkPad T470 (Proxmox, 8 GB RAM,
 i5-6300U). Designed for a landscape, wrist-mounted iPhone reached over Tailscale.
 
 ## Deployed layout (as built, 2026-08-14)
