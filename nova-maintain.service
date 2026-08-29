@@ -1,0 +1,21 @@
+[Unit]
+# Watches for maintenance requests written by the router and executes the ones
+# on its allowlist. Runs in LXC 101, OUTSIDE every container, so that the
+# Docker socket never has to be mounted into a service the browser can reach.
+Description=Nova maintenance watcher
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/orb/nova-maintain.py
+Restart=always
+RestartSec=5
+# It restarts containers and runs the vault scripts; it has no business
+# anywhere else on the filesystem.
+ReadWritePaths=/opt/orb
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

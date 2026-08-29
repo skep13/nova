@@ -69,6 +69,58 @@ services:
           # afford to be slow; generation cannot.
           memory: 400m
 
+  # Lemonade, on trial alongside llama rather than instead of it.
+  #
+  # It serves chat, embeddings, speech and images from one process with an
+  # OpenAI-compatible API, which means it could in principle replace four of
+  # the containers here. Whether it SHOULD is a question about tokens per
+  # second and answer quality on this hardware, and that is measurable — so it
+  # runs on its own port as a second agent and gets compared, rather than being
+  # adopted or dismissed on argument.
+  #
+  # Deliberately not published to the host: the router reaches it by service
+  # name like everything else, and nothing about a trial should widen what this
+  # box exposes.
+  lemonade:
+    image: ghcr.io/lemonade-sdk/lemonade-server:latest
+    container_name: orb-lemonade
+    # MEASURED AND NOT ADOPTED, on this hardware. Kept behind a profile so a
+    # plain `docker compose up -d` never starts it; bring it back with
+    # `docker compose --profile trial up -d lemonade`.
+    #
+    # Uncontended, same prompt, 200 tokens, three runs each:
+    #     llama.cpp  CPU        Qwen2.5-3B     8.37 tok/s
+    #     lemonade   Vulkan     Llama-3.2-3B   7.03 tok/s
+    #
+    # 16% slower WITH the iGPU than llama.cpp without it, which sounds wrong
+    # until you notice two things. Lemonade's chat engine IS llama.cpp — the
+    # load response says recipe: llamacpp — so there was never a faster core to
+    # find. And the accelerator it auto-selected, the HD 520, has no memory of
+    # its own: it shares the same DDR4-2133 bus that is already the binding
+    # constraint, so Vulkan adds marshalling overhead and buys no bandwidth.
+    #
+    # Its real advantages are unmeasurable in tok/s and still real: pulling a
+    # new 3B by name took 91 seconds against editing this file and rebuilding,
+    # a 69-model catalogue, and chat/vision/image/speech/embeddings in one
+    # process. On a machine with a discrete GPU those would be joined by an
+    # actual speed win. On this one they are not.
+    #
+    # Note before ever publishing its port: it serves /internal/mcp/*
+    # process-launch endpoints unauthenticated unless LEMONADE_API_KEY is set.
+    profiles: ["trial"]
+    restart: unless-stopped
+    volumes:
+      - lemonade-cache:/opt/lemonade/.cache/huggingface
+      - lemonade-llama:/opt/lemonade/llama
+      - lemonade-data:/opt/lemonade/.cache/lemonade
+      - lemonade-config:/opt/lemonade/.config/lemonade
+    deploy:
+      resources:
+        limits:
+          # Comparable to llama's 3500m so the comparison is about the software
+          # rather than about which one was given more room.
+          memory: 3400m
+
   # Web search. The offline Wikipedia is a snapshot and cannot know anything
   # that happened after it was made — asked about a model released last month it
   # is not wrong, it is silent. This is the path for everything the archive
@@ -336,3 +388,10 @@ services:
 
 volumes:
   models:
+  # Lemonade keeps its model cache, backend binaries and config in named
+  # volumes. Kept separate from the bind mounts so removing the trial is a
+  # single `docker compose down -v lemonade` and leaves nothing behind.
+  lemonade-cache:
+  lemonade-llama:
+  lemonade-data:
+  lemonade-config:

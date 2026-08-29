@@ -1869,6 +1869,82 @@ async def health(request):
     }, status=200 if not down else 503)
 
 
+# --- maintenance: request, never execute -------------------------------------
+# Nothing here runs a command. It writes a request and waits. The watcher that
+# decides whether to honour it (nova-maintain.py) runs as a systemd service in
+# the LXC, outside every container, precisely so this service never needs the
+# Docker socket — control of the daemon is control of the host, and this
+# endpoint is reachable from the browser.
+MAINT_REQUEST = LOG_DIR / "maintenance-request.json"
+MAINT_RESULT = LOG_DIR / "maintenance-result.json"
+MAINT_WAIT_S = float(os.environ.get("MAINT_WAIT", "120"))
+
+# Mirrors the watcher's list. The watcher's copy enforces; this one turns a
+# typo into a useful message immediately instead of a silent wait.
+MAINT_ACTIONS = {
+    "restart": "restart one service",
+    "reload-web": "test and reload the nginx config",
+    "rebuild-hubs": "regenerate the maps of content and the index",
+    "repair-links": "repair wikilinks across the vault",
+    "reindex": "clear the embedding cache and rebuild it",
+}
+MAINT_SERVICES = ("llama", "embed", "piper", "whisper", "kiwix", "webdav",
+                  "web", "remote", "searxng")
+
+
+async def maintain(request):
+    payload = await request.json()
+    action = (payload.get("action") or "").strip()
+    target = (payload.get("target") or "").strip()
+
+    if action not in MAINT_ACTIONS:
+        return web.json_response(
+            {"ok": False,
+             "error": f"{action!r} is not something Nova can do",
+             "allowed": MAINT_ACTIONS}, status=400)
+    if action == "restart" and target not in MAINT_SERVICES:
+        return web.json_response(
+            {"ok": False,
+             "error": f"{target!r} is not a service",
+             "services": list(MAINT_SERVICES)}, status=400)
+
+    req_id = f"{int(time.time()*1000)}-{action}"
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        MAINT_RESULT.unlink(missing_ok=True)      # do not read a stale answer
+        MAINT_REQUEST.write_text(json.dumps({
+            "id": req_id, "action": action, "target": target,
+            "at": time.time(),
+        }), encoding="utf-8")
+    except Exception as exc:
+        return web.json_response(
+            {"ok": False, "error": f"could not queue the request: {exc}"}, status=500)
+
+    # Restarting a container is seconds; rebuilding hubs over 745 notes is
+    # longer. Polled rather than pushed because the two processes share nothing
+    # but a directory, which is the entire point.
+    deadline = time.monotonic() + MAINT_WAIT_S
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.4)
+        try:
+            res = json.loads(MAINT_RESULT.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if res.get("id") == req_id:
+            return web.json_response(res, status=200 if res.get("ok") else 500)
+
+    return web.json_response(
+        {"ok": False, "id": req_id,
+         "error": "the maintenance watcher did not answer. Check "
+                  "systemctl status nova-maintain inside LXC 101."}, status=504)
+
+
+async def maintain_list(request):
+    """What Nova is permitted to do, so the page never has to guess."""
+    return web.json_response({"actions": MAINT_ACTIONS,
+                              "services": list(MAINT_SERVICES)})
+
+
 app.add_routes([
     web.post("/v1/chat/completions", chat),
     web.get("/agents", agents),
@@ -1878,6 +1954,8 @@ app.add_routes([
     web.post("/ingest", ingest),
     web.post("/research", research),
     web.get("/health", health),
+    web.post("/maintain", maintain),
+    web.get("/maintain", maintain_list),
 ])
 
 async def _on_startup(app):
