@@ -1,37 +1,118 @@
 #!/bin/sh
-# Nightly snapshot of the parts of Orb that exist nowhere else.
+# Nightly snapshot of the parts of Nova that exist nowhere else.
 #
 # The git repo deliberately excludes all of this: mem/ is personal, logs/ is a
 # record of what was asked, keys/ are secrets. That makes them exactly the
 # files with no second copy anywhere — a container rebuild or a disk fault
 # loses them silently, and nobody notices until they are wanted.
 #
-# logs/ matters more than it looks: it is now the recall corpus, so it IS the
+# logs/ matters more than it looks: it is the recall corpus, so it IS the
 # accumulated knowledge the device has picked up from the hosted models.
+#
+# ---------------------------------------------------------------------------
+# THIS SCRIPT SILENTLY DID NOTHING FOR A WEEK. Read before editing.
+#
+# `pct` lives in /usr/sbin. A root USER crontab (crontab -e) runs with
+# PATH=/usr/bin:/bin — it does not inherit the PATH set in /etc/crontab — so
+# pct was not found. The shell had already created the .part file by opening
+# the redirect, then the command failed and `set -e` aborted, leaving a
+# 0-byte file and no error anywhere, because the crontab line ended in
+# `>/dev/null 2>&1`.
+#
+# The last good backup was 22 August, taken by hand. Every scheduled run after
+# it failed, through the entire period in which the 343-note vault was built.
+#
+# Three things now prevent a repeat:
+#   1. PATH is set explicitly here and pct is called by absolute path.
+#   2. The archive is VERIFIED to contain notes, not merely to be valid gzip.
+#      An empty tar is perfectly valid gzip, which is exactly how you end up
+#      trusting a backup of nothing.
+#   3. Success and failure are both reported into the container, where
+#      /health reads the age and the page shows a fault chip if it goes stale.
+#      A backup nobody checks is a backup that is not happening.
+# ---------------------------------------------------------------------------
 set -eu
 
-DEST=/var/backups/orb
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+PCT=/usr/sbin/pct
+
+DEST=/var/backups/nova
 KEEP_DAYS=30
 CTID=101
 STAMP=$(date +%Y-%m-%d)
+ARCHIVE="$DEST/nova-$STAMP.tar.gz"
+PART="$ARCHIVE.part"
+
+# Optional off-box copy. The backups otherwise sit on the same physical disk
+# (sda) as the thing they back up, so a drive failure takes both. Set this to
+# an scp target reachable over Tailscale — e.g. user@fedora-laptop:/backups —
+# and add a key. Left empty it is skipped without complaint, because a laptop
+# that is asleep must not fail the backup.
+OFFBOX="${NOVA_BACKUP_OFFBOX:-}"
+
+note() { printf '%s %s\n' "$(date -Is)" "$*" >> "$DEST/backup.log"; }
+
+# Report status back INTO the container, so /health can see it and the page can
+# show a fault chip when this stops running. Best effort: a reporting failure
+# must never fail the backup itself.
+report() {
+    "$PCT" exec "$CTID" -- sh -c \
+        "mkdir -p /opt/orb/logs && printf '%s' '$1' > /opt/orb/logs/backup-status.json" \
+        >/dev/null 2>&1 || true
+}
+
+fail() {
+    note "FAILED $*"
+    report "{\"ok\":false,\"at\":\"$(date -Is)\",\"error\":\"$*\"}"
+    exit 1
+}
+
+trap 'fail "aborted at line $LINENO"' EXIT INT TERM
 
 mkdir -p "$DEST"
 chmod 700 "$DEST"          # contains API keys
 
+[ -x "$PCT" ] || fail "pct not found at $PCT"
+
 # Stream the tar out of the container rather than writing inside it: the LXC
-# disk is at 89% and has no room for a copy of its own data.
-pct exec "$CTID" -- tar czf - -C /opt/orb \
+# disk has no room for a copy of its own data.
+#
+# --warning=no-file-changed: mem/ is live and Obsidian may sync mid-run. tar
+# exits 1 on "file changed as we read it", which under set -e would abort a
+# backup that is in fact fine.
+"$PCT" exec "$CTID" -- tar czf - --warning=no-file-changed -C /opt/orb \
     mem keys logs docker-compose.yml nginx.conf index.html remote_proxy.py \
-    > "$DEST/orb-$STAMP.tar.gz.part"
+    > "$PART" || fail "tar/pct returned $?"
 
-mv "$DEST/orb-$STAMP.tar.gz.part" "$DEST/orb-$STAMP.tar.gz"
-chmod 600 "$DEST/orb-$STAMP.tar.gz"
+[ -s "$PART" ] || fail "archive is empty"
+gzip -t "$PART" || fail "archive is not valid gzip"
 
-# Verify it is readable before trusting it. An unverified backup is a guess.
-gzip -t "$DEST/orb-$STAMP.tar.gz"
+# Valid gzip is not the same as useful. An empty tar passes gzip -t, so count
+# what is actually in there and refuse to keep an archive with no notes.
+NOTES=$(tar tzf "$PART" | grep -c '^mem/.*\.md$' || true)
+[ "$NOTES" -ge 50 ] || fail "only $NOTES notes in the archive — expected the vault"
 
-find "$DEST" -name 'orb-*.tar.gz' -mtime +"$KEEP_DAYS" -delete
-find "$DEST" -name '*.part' -mtime +1 -delete    # tidy interrupted runs
+mv "$PART" "$ARCHIVE"
+chmod 600 "$ARCHIVE"
 
-printf '%s ok %s (%s)\n' "$(date -Is)" "orb-$STAMP.tar.gz" \
-    "$(du -h "$DEST/orb-$STAMP.tar.gz" | cut -f1)" >> "$DEST/backup.log"
+SIZE=$(du -h "$ARCHIVE" | cut -f1)
+
+if [ -n "$OFFBOX" ]; then
+    if scp -q -o ConnectTimeout=20 -o BatchMode=yes "$ARCHIVE" "$OFFBOX/" 2>/dev/null; then
+        note "offbox ok $OFFBOX"
+    else
+        # Deliberately not fatal: the far end being asleep is normal, and a
+        # local backup that exists beats a failed run that does not.
+        note "offbox UNREACHABLE $OFFBOX (local copy kept)"
+    fi
+fi
+
+find "$DEST" -name 'nova-*.tar.gz' -mtime +"$KEEP_DAYS" -delete
+find "$DEST" -name 'orb-*.tar.gz'  -mtime +"$KEEP_DAYS" -delete   # pre-rename
+find "$DEST" -name '*.part' -mtime +1 -delete                     # interrupted runs
+
+note "ok nova-$STAMP.tar.gz ($SIZE, $NOTES notes)"
+report "{\"ok\":true,\"at\":\"$(date -Is)\",\"file\":\"nova-$STAMP.tar.gz\",\"size\":\"$SIZE\",\"notes\":$NOTES}"
+
+trap - EXIT

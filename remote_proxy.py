@@ -21,6 +21,7 @@ local answers everything unless the user deliberately picks otherwise, and any
 remote failure lands straight back on local rather than surfacing an error.
 """
 import bisect
+import asyncio
 import datetime
 import html
 import json
@@ -986,9 +987,176 @@ def search_vault(query, allow_generated=True):
             "file": best["file"], "score": round(best_score, 2)}
 
 
+# --- semantic search --------------------------------------------------------
+# Runs only where the lexical search is not confident. See search_vault.
+EMBED_URL = os.environ.get("EMBED_URL", "http://embed:8080/v1/embeddings")
+EMBED_FILE = LOG_DIR / "embeddings.json"
+EMBED_CHARS = int(os.environ.get("EMBED_CHARS", "1200"))
+# Above this lexical score, the lexical answer is taken and no vector is even
+# computed. Genuine questions measured 11.9-20.8 here; nonsense measured
+# 5.7-8.1.
+# Measured over 20 paraphrased queries on this vault. Above 12 the lexical hit
+# was right every time; below it, it was right about half the time.
+LEXICAL_STRONG = float(os.environ.get("LEXICAL_STRONG", "12.0"))
+# Floor for returning anything at all.
+SEMANTIC_MIN = float(os.environ.get("SEMANTIC_MIN", "0.62"))
+# Bar to OVERRIDE a lexical hit that already exists. Higher than the floor,
+# because a lexical hit at least shares a word with the question and a vector
+# match may share nothing but vibe.
+#
+# Honest summary of the measurement: across a broad set this is a wash — 7/12
+# either way. It earns its place on FIELD questions, where lexical answered
+# "what happens to your body at very high places" with Drowning and "when your
+# body loses too much water" with Survival skills, while the vectors answered
+# Altitude sickness and Dehydration. On a search-and-rescue device those are
+# the queries that matter, and Drowning is not a harmless miss.
+SEMANTIC_OVERRIDE = float(os.environ.get("SEMANTIC_OVERRIDE", "0.70"))
+
+_vecs = {}              # file name -> {"mtime": float, "vec": [float]}
+_embed_ready = False
+
+
+def _load_vecs():
+    global _vecs
+    try:
+        _vecs = json.loads(EMBED_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        _vecs = {}
+
+
+def _save_vecs():
+    try:
+        tmp = EMBED_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_vecs), encoding="utf-8")
+        tmp.replace(EMBED_FILE)
+    except Exception:
+        pass
+
+
+async def embed_text(session, text, kind):
+    """One vector. nomic-embed needs its task prefix or quality falls off a
+    cliff — the same string embedded as a document and as a query is meant to
+    land in different places."""
+    prefix = "search_document: " if kind == "doc" else "search_query: "
+    async with session.post(EMBED_URL, json={"input": prefix + text[:EMBED_CHARS]}) as r:
+        if r.status != 200:
+            raise RuntimeError(f"{r.status}: {(await r.text())[:120]}")
+        data = await r.json()
+    return data["data"][0]["embedding"]
+
+
+def _cos(a, b):
+    dot = na = nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    return dot / ((na ** .5) * (nb ** .5) + 1e-9)
+
+
+async def build_embeddings():
+    """Embed anything new or changed. Runs in the background at startup.
+
+    Sequential on purpose. The box has two cores, the embed container is
+    pinned to one, and a reply in progress must never be slowed down by
+    reindexing — this is allowed to take minutes.
+    """
+    global _embed_ready
+    _load_vecs()
+    load_vault(force=True)
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    done = skipped = failed = 0
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            for n in _vault:
+                path = VAULT_DIR / n["file"]
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                have = _vecs.get(n["file"])
+                if have and "tvec" in have and abs(have.get("mtime", 0) - mtime) < 1:
+                    skipped += 1
+                    continue
+                try:
+                    # TWO vectors per note. One for the body, one for the title
+                    # alone, and the match is the better of the two.
+                    #
+                    # A single vector over 1200 characters is dominated by
+                    # whatever generic prose the note opens with, which is why
+                    # the first version scored 0.67-0.79 for right and wrong
+                    # answers alike and discriminated nothing. A title is the
+                    # concept name, and a concept name is what a paraphrased
+                    # question is actually reaching for.
+                    _vecs[n["file"]] = {
+                        "mtime": mtime,
+                        "vec": await embed_text(s, n["title"] + ". " + n["body"], "doc"),
+                        "tvec": await embed_text(s, n["title"], "doc"),
+                    }
+                    done += 1
+                    if done % 25 == 0:
+                        _save_vecs()          # survive a restart mid-run
+                except Exception:
+                    failed += 1
+        # Notes deleted from the vault should not linger as searchable vectors.
+        live = {n["file"] for n in _vault}
+        for gone in [f for f in _vecs if f not in live]:
+            _vecs.pop(gone, None)
+        _save_vecs()
+    finally:
+        _embed_ready = bool(_vecs)
+    print(f"embeddings: {done} new, {skipped} cached, {failed} failed, "
+          f"{len(_vecs)} total", flush=True)
+
+
+async def semantic_search(query):
+    """Nearest note by meaning, or None."""
+    if not _vecs:
+        return None
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            qv = await embed_text(s, query, "query")
+    except Exception:
+        return None                      # embed container down: lexical stands
+
+    load_vault()
+    by_file = {n["file"]: n for n in _vault}
+    best, best_sim = None, 0.0
+    for fname, rec in _vecs.items():
+        n = by_file.get(fname)
+        if not n or n.get("generated"):
+            continue                     # same rule as lexical: no self-grounding
+        sim = _cos(qv, rec["vec"])
+        tv = rec.get("tvec")
+        if tv:
+            sim = max(sim, _cos(qv, tv))
+        if sim > best_sim:
+            best, best_sim = n, sim
+
+    if not best or best_sim < SEMANTIC_MIN:
+        return None
+    return {"title": best["title"], "text": best["body"][:NOTE_CHARS],
+            "file": best["file"], "score": round(best_sim, 3), "via": "semantic"}
+
+
 async def recall(request):
-    hit = search_vault(request.query.get("q", ""))
-    return web.json_response({"hit": hit, "notes_indexed": len(_vault)})
+    q = request.query.get("q", "")
+    hit = search_vault(q)
+    # Only when lexical is unsure. A confident lexical hit is never second
+    # guessed — see LEXICAL_STRONG.
+    if (not hit or hit["score"] < LEXICAL_STRONG) and q.strip():
+        alt = await semantic_search(q)
+        if alt and not hit:
+            hit = alt
+        elif alt and hit:
+            # Both found something and lexical is not confident. The vector
+            # wins only if it is confident in its own terms.
+            if alt["score"] >= SEMANTIC_OVERRIDE:
+                hit = alt
+    return web.json_response({"hit": hit, "notes_indexed": len(_vault),
+                              "embedded": len(_vecs)})
 
 
 async def diag(request):
@@ -1416,6 +1584,128 @@ async def research(request):
     return resp
 
 
+# --- health: is every part of this actually alive? --------------------------
+# Checked by REQUEST, not by container state. The whisper container reported
+# "Up" for days while crash-looping on a missing shared library, so liveness
+# has to mean "answered a question", not "the process exists".
+PIPER_URL   = os.environ.get("PIPER_URL",   "http://piper:5000")
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8080")
+KIWIX_URL   = os.environ.get("KIWIX_URL",   "http://kiwix:8080")
+WEBDAV_URL  = os.environ.get("WEBDAV_URL",  "http://webdav:6065")
+HEALTH_TIMEOUT = float(os.environ.get("HEALTH_TIMEOUT", "6"))
+
+
+async def _probe(session, name, method, url, want=(200,), **kw):
+    started = time.monotonic()
+    try:
+        async with session.request(method, url, **kw) as r:
+            body = await r.read()
+            ok = r.status in want
+            return name, {"ok": ok, "status": r.status,
+                          "ms": int((time.monotonic() - started) * 1000),
+                          "bytes": len(body),
+                          "error": None if ok else f"HTTP {r.status}"}
+    except Exception as exc:
+        return name, {"ok": False, "status": None,
+                      "ms": int((time.monotonic() - started) * 1000),
+                      "bytes": 0, "error": type(exc).__name__ + ": " + str(exc)[:120]}
+
+
+async def health(request):
+    """Every subsystem, probed in parallel."""
+    timeout = aiohttp.ClientTimeout(total=HEALTH_TIMEOUT + 2)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        checks = [
+            # The model is asked to generate one token, not merely to list
+            # models: llama serves /v1/models happily while the weights are
+            # still loading, and "can it answer" is the question.
+            _probe(s, "llama", "POST", LOCAL_URL,
+                   json={"messages": [{"role": "user", "content": "ok"}],
+                         "max_tokens": 1, "stream": False}),
+            _probe(s, "piper", "GET", PIPER_URL + "/voices", want=(200, 404)),
+            # whisper-server answers /inference and nothing else, so a bare
+            # GET is expected to be rejected — a 400 or 404 still proves the
+            # process is up and serving, which a connection refusal does not.
+            _probe(s, "whisper", "GET", WHISPER_URL + "/inference",
+                   want=(200, 400, 404, 405, 500)),
+            _probe(s, "kiwix", "GET", KIWIX_URL + "/search?books.filter.lang=eng"
+                                                  "&pattern=water&userlang=en"),
+            _probe(s, "webdav", "OPTIONS", WEBDAV_URL + "/dav/"),
+        ]
+        results = dict(await asyncio.gather(*checks))
+
+    # The vault is a filesystem question, not a network one.
+    try:
+        load_vault()
+        notes = len(_vault)
+        files = sum(1 for _ in _vault_files())
+        results["vault"] = {"ok": files > 0, "status": None, "ms": 0,
+                            "notes_indexed": notes, "files": files,
+                            "error": None if files else "no notes on disk"}
+    except Exception as exc:
+        results["vault"] = {"ok": False, "error": str(exc)[:120]}
+
+    # Remote agents are reported but never counted against health: they are
+    # optional by design and the device is supposed to work with none of them.
+    agents = {}
+    for a in AGENTS:
+        if a["name"] == "local":
+            continue
+        agents[a["name"]] = {"configured": bool(read_key(a["name"])),
+                             "available": available(a),
+                             "last_error": _last_error.get(a["name"]),
+                             "disabled_reason": hard_failed(a["name"])}
+
+    # Backup freshness. The nightly job on the Proxmox host writes this file
+    # into the container after each run; without it a broken backup is
+    # invisible, which is precisely what happened — the scheduled job failed
+    # silently for a week while the whole vault was being built, because `pct`
+    # is in /usr/sbin and a user crontab runs with PATH=/usr/bin:/bin.
+    #
+    # Reported as degraded, never critical: a stale backup is a serious problem
+    # at home and no reason at all to tell someone in a field that their device
+    # is down.
+    try:
+        raw = json.loads((LOG_DIR / "backup-status.json").read_text(encoding="utf-8"))
+        at = datetime.datetime.fromisoformat(raw.get("at"))
+        age_h = (datetime.datetime.now(at.tzinfo) - at).total_seconds() / 3600
+        fresh = raw.get("ok") and age_h < 48
+        results["backup"] = {
+            "ok": bool(fresh), "status": None, "ms": 0,
+            "age_hours": round(age_h, 1), "notes": raw.get("notes"),
+            "file": raw.get("file"),
+            "error": None if fresh else (
+                raw.get("error") or f"last successful backup was {age_h:.0f} h ago"),
+        }
+    except FileNotFoundError:
+        results["backup"] = {"ok": False, "status": None, "ms": 0,
+                             "error": "no backup has ever reported in"}
+    except Exception as exc:
+        results["backup"] = {"ok": False, "status": None, "ms": 0,
+                             "error": f"unreadable status: {str(exc)[:80]}"}
+
+    # Embeddings are an enhancement, never critical: with the embed container
+    # down, retrieval falls back to the lexical search that was here first.
+    results["embeddings"] = {
+        "ok": bool(_vecs), "status": None, "ms": 0,
+        "vectors": len(_vecs), "notes": len(_vault),
+        "error": None if _vecs else "no embeddings built yet",
+    }
+
+    required = ("llama", "kiwix", "vault")
+    degraded = [k for k, v in results.items() if not v.get("ok")]
+    down = [k for k in required if not results.get(k, {}).get("ok")]
+
+    return web.json_response({
+        "ok": not down,
+        "state": "down" if down else ("degraded" if degraded else "ok"),
+        "failing": degraded,
+        "critical": down,
+        "checks": results,
+        "agents": agents,
+    }, status=200 if not down else 503)
+
+
 app.add_routes([
     web.post("/v1/chat/completions", chat),
     web.get("/agents", agents),
@@ -1424,11 +1714,35 @@ app.add_routes([
     web.get("/recall", recall),
     web.post("/ingest", ingest),
     web.post("/research", research),
+    web.get("/health", health),
 ])
+
+async def _on_startup(app):
+    """Build embeddings in the background.
+
+    Deliberately not awaited: embedding 343 notes on one core takes minutes,
+    and the router must answer chat immediately. Until it finishes, retrieval
+    is exactly the lexical search it has always been — the semantic path
+    simply has nothing to look at yet, which is why it is a fallback rather
+    than the primary.
+    """
+    app["embed_task"] = asyncio.create_task(build_embeddings())
+
+
+async def _on_cleanup(app):
+    task = app.get("embed_task")
+    if task and not task.done():
+        task.cancel()
+
+
+app.on_startup.append(_on_startup)
+app.on_cleanup.append(_on_cleanup)
+
 
 if __name__ == "__main__":
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     load_recall()          # previous remote answers are free to serve offline
     load_places()          # offline place names for turning a fix into words
+    _load_vecs()           # cached note vectors, if any survive from last run
     load_addresses()       # street addresses resolved before now work offline
     web.run_app(app, host="0.0.0.0", port=5003, print=None)

@@ -3,50 +3,74 @@
 Voice chat UI for a local 3B model on a ThinkPad T470 (Proxmox, 8 GB RAM,
 i5-6300U). Designed for a landscape, wrist-mounted iPhone reached over Tailscale.
 
-## Deployed layout (as built, 2026-08-14)
+## Deployed layout
 
-    iPhone (Safari, on the tailnet)
-      |  https
-      v
+    iPhone (Safari, on the tailnet)          Fedora laptop / iPad
+      |  http (mic works; https not needed)     |
+      v                                         v
     LXC 102 "tailscale"  192.168.1.235 / 100.108.27.102
-      tailscale serve :443 -> http://192.168.1.109:8080
+      exit node + subnet router for 192.168.1.0/24
       |
       v
-    LXC 101 "docker"     192.168.1.109   (2048 MB, 2 cores)
-      orb-web   nginx :8080 -> static page + /v1/ proxy
-      orb-llama llama.cpp  :8080 (internal only)
+    LXC 101 "docker"     192.168.1.109   (5120 MB, 2 cores)
+      web      nginx :8080 -> page, and one origin for everything below
+      remote   agent router: local model or a free hosted one
+      llama    Qwen2.5-3B-Instruct Q4_K_M
+      embed    nomic-embed-text-v1.5, vault vectors
+      piper    neural TTS
+      whisper  whisper.cpp base.en, speech to text
+      kiwix    offline Wikipedia + medical archives
+      webdav   the vault, for Obsidian on any device
 
-- Live URL: **https://orb.example-tailnet.ts.net**
-- LAN URL (http, mic works): http://192.168.1.109:8080
+- **LAN URL: http://192.168.1.109:8080** — use this everywhere. The microphone
+  works over plain http; https is not required and never was.
+- HTTPS via `tailscale serve` exists as a fallback only.
 - Stack lives in `/opt/orb` inside LXC 101.
+
+Because LXC 102 is an approved subnet router, the LAN URL works off-site too,
+without routing everything through the exit node.
 
 Tailscale and Docker are in **separate** containers, so serve proxies across
 the LAN rather than to localhost. Nothing is published to the internet;
-`tailscale serve` is tailnet-only (that would be `funnel`).
+`tailscale serve` is tailnet-only (that would be `funnel`, which must never be
+enabled while the WebDAV endpoint is unauthenticated).
 
 ## Measured on this hardware
 
 | | Cold (first request after start) | Warm |
 |---|---|---|
-| Prompt eval | ~5 tok/s | **~40 tok/s** |
-| Generation  | ~10 tok/s | **~13 tok/s** |
+| Prompt eval | ~5 tok/s | ~40 tok/s |
+| Generation (3B) | ~6 tok/s | **~8.3 tok/s** |
+| Speech to text (base.en) | | ~2.2 s |
+| Research note, local model | | ~170 s |
+| Research note, hosted agent | | ~5 s |
 
-Steady-state memory: `orb-llama` 842 MiB of its 1465 MiB limit.
-RAM is confirmed **single-channel** — `ChannelB-DIMM0: No Module Installed`.
-Filling that slot should take generation to roughly 20-24 tok/s.
+RAM went 4 GB -> 8 GB on 2026-08-17 and the model went 1.5B -> 3B with it. The
+3B is exactly half the speed and was kept anyway: asked how much water to drink
+hiking in heat, the 1.5B answered "1-2 litres per day", which is low enough to
+be dangerous. The 3B answered 2.5-3. For a search-and-rescue device that is the
+whole argument — the 1.5B is faster at being wrong.
+
+**CPU is now the binding constraint, not RAM.** The i5-6300U is two physical
+cores, so llama already saturates it at `-t 2`; more threads or more cores in
+the LXC will not help.
 
 ## What runs
 
-| Container | Job | RAM |
+| Container | Job | RAM limit |
 |---|---|---|
-| `llama` | Qwen2.5-1.5B-Instruct Q4_K_M, OpenAI-compatible API | ~1.03 GB |
-| `piper` | Piper neural TTS, `en_US-amy-medium` (female) | ~304 MB |
-| `kiwix` | Offline Simple English Wikipedia (938 MB ZIM) | ~160 MB |
-| `web`   | nginx: serves the page, proxies all three on one origin | ~8 MB |
+| `llama` | Qwen2.5-3B-Instruct Q4_K_M, OpenAI-compatible API, 8k context | 3500m |
+| `remote` | agent router, vault search, `/research`, `/health`, geo | 256m |
+| `kiwix` | full English Wikipedia (50 GB) + mdwiki-medicine (2.2 GB) | 1024m |
+| `piper` | Piper neural TTS, `en_US-lessac-high` | 640m |
+| `embed` | nomic-embed-text-v1.5, semantic vault search | 400m |
+| `whisper` | whisper.cpp `base.en`, server-side speech to text | 500m |
+| `webdav` | hacdias/webdav over the vault, for Obsidian | 96m |
+| `web` | nginx: the page, and one origin for all of the above | 64m |
 
 ## Skills: answered exactly, not generated
 
-Some things a 1.5B model does badly and a parser does perfectly. These are
+Some things a small model does badly and a parser does perfectly. These are
 handled in the browser before the model is invoked, so the answer is exact.
 
 | Say | Get |
@@ -85,10 +109,13 @@ reliably than descriptions buried in context.
 
 ## Memory and your own notes
 
-Everything lives as Markdown in `/opt/orb/mem/` inside LXC 101, served and
-written through nginx's WebDAV module — no database, no extra container, no
-extra RAM. The folder is vault-shaped, so Obsidian can open it directly if you
-ever sync it there.
+Everything lives as Markdown in `/opt/orb/mem/` inside LXC 101 — no database.
+It is a real Obsidian vault: 343 notes, 28 maps of content, zero broken
+wikilinks, synced to phone, iPad and laptop over WebDAV at `/dav/Orb/`.
+
+nginx's own dav module serves the page's short facts, but it **cannot** serve
+Obsidian — it does PUT and DELETE and returns 405 to PROPFIND, which is how a
+client lists a directory. That is what the `webdav` container is for.
 
 ### Adding your own material
 
@@ -115,7 +142,7 @@ and `created:`. A leading `# Heading` is used as the title if no frontmatter.
 | **Fact** | ≤ 240 chars | Eligible for **every** prompt, up to 8 by relevance |
 | **Note** | > 240 chars | **Retrieved** only when relevant, excerpted to ~900 chars |
 
-This split exists because the context window is 4k. A 2000-word project brief
+This split exists because the context window is 8k. A 2000-word project brief
 injected into every prompt would crowd out the conversation; retrieved on
 demand it costs nothing until it is needed. A matching note also **outranks
 Wikipedia** — it is your own material about your own work — and suppresses the
@@ -179,9 +206,84 @@ later carries no other context.
 Expect **~170 s on the local model** for a 900-token note and a few seconds on a
 hosted agent. It streams, so text appears as it arrives.
 
+## Retrieval: lexical first, meaning second
+
+Vault search is rarity-weighted whole-word matching with stemming and acronym
+aliases, tuned over four rounds of real failures — substring matching had
+"work" hitting net**work**; broad titles outranked specific ones until IDF was
+added; "scheduler" missed "Scheduling" until stemming; "tls" missed Transport
+Layer Security until acronym aliases.
+
+Behind it sits a semantic fallback, and it is deliberately only a fallback.
+Lexical hits are checked first and a confident one is never second-guessed —
+measured on this vault, genuine questions score 11.9-20.8 and nonsense scores
+5.7-8.1, so 8.0 is the line. Below it, the question is embedded and compared
+against cached note vectors.
+
+This exists for the query lexical retrieval structurally cannot answer: *"how
+do i stop someone bleeding out"* shares no stemmable word with a note titled
+**Bleeding**. On this device that is not an edge case.
+
+Embeddings are cached against each note's mtime, so a restart re-embeds
+nothing and an edited note re-embeds only itself. With the `embed` container
+down, retrieval silently falls back to lexical alone.
+
+## Health: knowing when something is broken
+
+`GET /health` asks every subsystem a real question and reports what answered.
+
+It exists because two failures were found by accident rather than by anything
+noticing. The whisper container exited 127 on every start for days, because its
+Dockerfile copied the binary without the shared libraries it linked against.
+Groq retired a model mid-use and the agent 404'd. In both cases the page still
+loaded and the orb still lit up.
+
+So liveness means *answered a question*, not *the process exists* — `docker ps`
+reported whisper "Up" the entire time it was crash-looping. llama is asked to
+generate a token, not merely to list models, because it serves `/v1/models`
+happily while weights are still loading.
+
+The page polls it and shows a red chip **only when something is failing**. A
+permanent green tick is noise you stop reading within a day, and then it is
+worth nothing on the day it should have turned red.
+
+`llama`, `kiwix` and the vault are critical; everything else degrades. Hosted
+agents are reported but never counted — the device is supposed to work with
+none of them.
+
+## Backups
+
+`nova-backup.sh` on the Proxmox host, nightly at 04:12, 30 days retained. It
+tars `mem/`, `keys/`, `logs/` and the config out of the container — everything
+the git repo deliberately excludes, which is exactly the set of files with no
+second copy anywhere.
+
+**This job silently did nothing for a week.** `pct` lives in `/usr/sbin`, and a
+root *user* crontab runs with `PATH=/usr/bin:/bin` — it does not inherit the
+PATH from `/etc/crontab`. The shell created the `.part` file by opening the
+redirect, `pct` was not found, `set -e` aborted, and the crontab line ended in
+`>/dev/null 2>&1` so nothing was ever reported. The last good backup predated
+the entire vault.
+
+Three things now prevent a repeat:
+
+1. PATH is set inside the script and `pct` is called by absolute path.
+2. The archive is verified to **contain notes**, not merely to be valid gzip —
+   an empty tar is perfectly valid gzip, which is how you end up trusting a
+   backup of nothing.
+3. Success and failure are reported back into the container, `/health` reads
+   the age, and the page shows a fault chip if it goes stale. A backup nobody
+   checks is a backup that is not happening.
+
+Backups live on the same physical disk as the thing they back up. Set
+`NOVA_BACKUP_OFFBOX` to an scp target to get a copy off the box; an unreachable
+target is logged, never fatal, because a sleeping laptop must not fail a backup.
+
+Restore is `tar xzf` — verified end to end: 343 notes in, 343 notes out.
+
 ## Grounding: offline Wikipedia
 
-A 1.5B model invents plausible-sounding facts. The single cheapest accuracy
+A small model invents plausible-sounding facts. The single cheapest accuracy
 win on this hardware is handing it a real article first.
 
 **The model has no tools and makes no tool calls.** Verity measured
@@ -206,7 +308,7 @@ The article used is shown as a trace line in the transcript, so a wrong answer
 is diagnosable instead of merely confident. The book button in the rail toggles
 grounding off, and the choice is remembered.
 
-Grounding improves accuracy; it does not make a 1.5B model reliable. It still
+Grounding improves accuracy; it does not make a 3B model reliable. It still
 paraphrases loosely — expect the occasional detail to be off even with a
 correct source in front of it.
 

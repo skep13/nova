@@ -558,6 +558,13 @@ body.speaking.has-avatar  .avatar{animation:avSpeak 1.35s ease-in-out infinite}
 }
 /* A lit pip rather than a filled pill: reads as a status lamp, and survives
    being glanced at from an angle better than a colour change alone. */
+.chip.fault{
+  color:#ffc9ce;
+  background:linear-gradient(180deg,rgba(190,60,70,.22),rgba(150,40,50,.10));
+  border-color:rgba(255,120,130,.36);
+}
+.chip.fault::before{background:#ff8b95;box-shadow:0 0 7px rgba(255,120,130,.85)}
+
 .chip::before{
   content:'';display:inline-block;vertical-align:middle;
   width:4px;height:4px;border-radius:50%;margin-right:6px;
@@ -778,6 +785,10 @@ html.dimmed .dim{opacity:.92;pointer-events:auto}
     <div class="glance">
       <button class="chip" id="agentChip" aria-label="Model in use, tap to change">local</button>
       <button class="chip geo" id="geoChip" aria-label="Position, tap for a fix">position</button>
+      <!-- Hidden unless a subsystem is actually failing. A permanent green
+           "all ok" badge is noise you stop reading within a day, and then it
+           is worth nothing on the day it turns red. -->
+      <button class="chip fault" id="healthChip" aria-label="A subsystem is failing, tap for detail" hidden>fault</button>
     </div>
   </div>
 
@@ -1357,16 +1368,26 @@ if ('speechSynthesis' in window){
 function speakingNow(){
   return speakingCount > 0 || !!(window.speechSynthesis && speechSynthesis.speaking);
 }
+/* Speaking outranks thinking while audio is actually playing.
+   The guard used to be `if (!busy)`, and busy stays true for the whole
+   streamed reply — but speech starts sentence by sentence DURING that stream,
+   so by the time it cleared, most of the talking was over. The speaking state
+   therefore almost never appeared, which is backwards: once you can hear it,
+   "it is talking" is the more useful thing for the orb to be saying than "it
+   is thinking". Generation continuing underneath is not news at that point. */
 function onSpeakStart(){
   speakingCount++;
-  if (!busy) setState('speaking');
+  setState('speaking');
   pulse(.7);
 }
 function onSpeakEnd(){
   speakingCount = Math.max(0, speakingCount - 1);
-  if (speakingCount === 0 && !busy && !(window.speechSynthesis && speechSynthesis.speaking)){
-    setState('idle', idleHint());
-  }
+  if (speakingCount > 0 || (window.speechSynthesis && speechSynthesis.speaking)) return;
+  // Falls back to whatever is still true underneath, rather than assuming
+  // idle: a reply can finish speaking one sentence while the rest is still
+  // being generated.
+  if (busy) setState('thinking');
+  else setState('idle', idleHint());
 }
 function cancelSpeech(){
   if (window.speechSynthesis) speechSynthesis.cancel();
@@ -3699,7 +3720,73 @@ ping();                             // also warms the model connection
 // only probe the voice server if replies will actually be spoken; a text-only
 // user should not pay a synthesis on every launch. Unmuting probes on demand.
 if (speakOn) probeTTS();
-setInterval(ping, PING_MS);
+
+/* ---- health ----
+   The ping above only asks whether the model answers. It said nothing while
+   whisper crash-looped for days, or when a hosted model was retired underneath
+   an agent — both of which were eventually found by accident. This asks every
+   subsystem and only speaks up when one of them is actually failing.
+
+   Quiet by design: no badge while things work. A permanent green tick is noise
+   you stop reading within a day, and then it is worth nothing on the day it
+   should have turned red. */
+const healthChip = document.getElementById('healthChip');
+let lastHealth = null;
+
+async function checkHealth(){
+  try {
+    const r = await fetch('/health', { cache:'no-store' });
+    const h = await r.json();
+    lastHealth = h;
+    const bad = h.failing || [];
+    if (!bad.length){ healthChip.hidden = true; return; }
+    // Critical failures name themselves; anything else is degraded but usable,
+    // and saying so is the difference between "check this when you get home"
+    // and "this device cannot help you right now".
+    const crit = h.critical || [];
+    healthChip.hidden = false;
+    healthChip.textContent = (crit.length ? 'down: ' : 'degraded: ') + bad.join(' ');
+  } catch {
+    // A failed health request is not itself a fault worth alarming about —
+    // the ping already covers "the server is unreachable", and duplicating
+    // that here would light the chip red every time the phone loses signal.
+    healthChip.hidden = true;
+  }
+}
+
+healthChip.addEventListener('click', (e) => {
+  e.stopPropagation();                 // the whole left pane is the mic
+  if (!lastHealth) return;
+  const c = lastHealth.checks || {};
+  const lines = Object.keys(c).map(k => {
+    const v = c[k];
+    return k + ': ' + (v.ok ? 'ok' : (v.error || 'failed'))
+             + (v.ms != null ? ' (' + v.ms + ' ms)' : '');
+  });
+  bubble('bot', lines.join('\n'));
+});
+
+const HEALTH_MS = 300000;              // five minutes; it asks llama for a token
+let healthTimer = setInterval(checkHealth, HEALTH_MS);
+checkHealth();
+
+/* The reachability ping only means anything while someone is looking. Left on
+   a fixed interval it fired every 30 seconds whether the app was on screen or
+   in a pocket — iOS throttles background timers but does not stop them, and on
+   a wrist the whole day is spent in that state. It stops when the page is
+   hidden and fires once immediately on return, which is the moment the answer
+   is actually wanted. */
+let pingTimer = setInterval(ping, PING_MS);
+document.addEventListener('visibilitychange', () => {
+  clearInterval(pingTimer);
+  clearInterval(healthTimer);
+  if (document.visibilityState === 'visible'){
+    ping();
+    checkHealth();
+    pingTimer   = setInterval(ping, PING_MS);
+    healthTimer = setInterval(checkHealth, HEALTH_MS);
+  }
+});
 document.addEventListener('pointerdown', poke, { passive:true });
 document.addEventListener('keydown', poke, { passive:true });
 

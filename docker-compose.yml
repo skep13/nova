@@ -32,6 +32,43 @@ services:
           # model without touching this file again.
           memory: 3500m
 
+  # Embeddings, for meaning-based vault search. Lexical retrieval cannot match
+  # "how do i stop someone bleeding out" to a note titled Bleeding: there is no
+  # shared word to stem or alias. That is the exact query this device exists
+  # for, so the gap matters more here than the feature list suggests.
+  #
+  # A separate container rather than a second job for the chat model: llama is
+  # loaded with a generative model and `-t 2` on a two-core box, and asking it
+  # to embed would either evict the weights or contend for both cores mid-reply.
+  #
+  # 137M parameters against the chat model's 3B — embedding is a much smaller
+  # problem than generation, and this one is small enough that the whole vault
+  # can be embedded once and then queried in single-digit milliseconds.
+  embed:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: orb-embed
+    restart: unless-stopped
+    volumes:
+      - models:/root/.cache/llama.cpp
+    # --pooling mean is required: BERT-family embedding models have no
+    # last-token semantics to pool from, and the default returns nonsense
+    # vectors that still look like valid floats.
+    command: >
+      -hf nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M
+      --host 0.0.0.0
+      --port 8080
+      --embedding
+      --pooling mean
+      -c 2048
+      -t 1
+    deploy:
+      resources:
+        limits:
+          # -t 1 deliberately: this must never take both cores away from a
+          # reply in progress. Embedding the vault is a background job that can
+          # afford to be slow; generation cannot.
+          memory: 400m
+
   piper:
     build:
       context: .
