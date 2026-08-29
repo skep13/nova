@@ -1891,6 +1891,12 @@ const RE_GREET    = /^\s*(?:hello|hi|hiya|hey|yo|howdy|greetings|good\s+(?:morni
 const RE_WHERE    = /^\s*(?:where\s+am\s+i|where\s+are\s+we|what(?:'?s|\s+is)?\s+my\s+(?:location|position|grid(?:\s*ref(?:erence)?)?|co-?ordinates)|my\s+(?:location|position|coordinates)|grid\s*ref(?:erence)?|location|position)\s*[?.!]*\s*$/i;
 const RE_MARK     = /^\s*(?:mark\s+(?:this\s+)?(?:spot|point|position|place)|drop\s+a\s+pin|save\s+(?:this\s+)?(?:spot|position)|pin\s+this)\s*[?.!]*\s*$/i;
 const RE_TOPIN    = /^\s*(?:(?:back|way|bearing|distance)\s+to\s+(?:the\s+)?pin|where'?s?\s+(?:the\s+)?pin|return\s+to\s+(?:the\s+)?pin|how\s+far\s+(?:is\s+)?(?:the\s+)?pin)\s*[?.!]*\s*$/i;
+
+// Research is opt-in by an explicit verb, never inferred from the shape of a
+// question. Every ordinary question would qualify as something worth reading
+// up on, and a vault that files a note on each of them stops being a second
+// brain within a week. Asking is the signal.
+const RE_RESEARCH = /^\s*(?:research|look\s+up|read\s+up\s+on|study\s+up\s+on|(?:make|write|take|create|do)\s+(?:me\s+)?(?:a\s+|some\s+)?notes?\s+(?:on|about)|note\s+(?:on|about))\s+(.{3,200}?)\s*[?.!]*\s*$/i;
 const GREETINGS = [
   'Hello. What are we looking at?',
   'Still here. What do you need?',
@@ -2438,6 +2444,113 @@ function stripMarkdown(s){
 }
 
 /* ============ chat ============ */
+/* ============ research ============
+   Ask a question, get an answer, and get a note filed in the vault.
+
+   The server does the looking-up: it searches the notes and the offline
+   Wikipedia itself, ranks what it finds, and hands the model only the text it
+   found. Same principle as retrieval and memory here — the model is never
+   asked to DECIDE whether to search or what to search for, only to write up
+   what was put in front of it. A 3B is reliable at the second and not the
+   first.
+
+   Streams like a normal reply, then a trailing event names the note that was
+   written. Nothing is spoken about the filing: on a wrist the answer is the
+   point, and the note is a side effect worth seeing but not hearing. */
+async function doResearch(text, topic){
+  busy = true;
+  bubble('user', text);
+  input.value = '';
+  const el = bubble('bot', '');
+  el.classList.add('pending');
+  setState('thinking', 'reading up');
+
+  let full = '', spoken = 0, queued = false, filed = null;
+
+  try {
+    const res = await fetch('/research', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ q: topic, agent: agentName })
+    });
+    if (!res.ok){
+      // The server explains itself on 404 — "nothing found for that in the
+      // vault or the offline archive" is far more useful than a status code.
+      let why = 'the research endpoint returned ' + res.status;
+      try { const j = await res.json(); if (j && j.error) why = j.error; } catch {}
+      throw new Error(why);
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    for(;;){
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream:true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines){
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const payload = t.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let j; try { j = JSON.parse(payload); } catch { continue; }
+
+        if (j.orb_note) filed = j.orb_note;      // the trailing event
+
+        const c = j.choices && j.choices[0];
+        const delta = c && c.delta ? (c.delta.content || '') : '';
+        if (!delta) continue;
+
+        full += delta;
+        const follow = atBottom();
+        el.textContent = stripMarkdown(full);
+        if (follow) log.scrollTop = log.scrollHeight;
+        pulse(.4);
+
+        const bound = Math.max(
+          full.lastIndexOf('. '), full.lastIndexOf('! '),
+          full.lastIndexOf('? '), full.lastIndexOf('\n')
+        );
+        if (bound > spoken){
+          queued = speak(full.slice(spoken, bound + 1)) || queued;
+          spoken = bound + 1;
+        }
+      }
+    }
+
+    if (!full.trim()) throw new Error('the model returned nothing');
+
+    el.classList.remove('pending');
+    restAt(el);
+    if (full.slice(spoken).trim()) queued = speak(full.slice(spoken)) || queued;
+    el.textContent = stripMarkdown(full);
+
+    if (filed && filed.file){
+      trace('\u{1F4DD} filed as ' + filed.title);
+      if (filed.sources && filed.sources.length)
+        trace('\u{1F4DA} ' + filed.sources.join(' · '));
+    } else {
+      trace('⚠️ answered, but the note could not be written');
+    }
+
+    // Kept in history so the conversation can continue from it, exactly as it
+    // would after any other answer.
+    history.push({ role:'user', content:text });
+    history.push({ role:'assistant', content: full });
+    saveHistory();
+
+  } catch (err){
+    el.remove();
+    bubble('err', 'Could not research that: ' + err.message);
+  } finally {
+    busy = false;
+    if (!queued) setState('idle', idleHint());
+  }
+}
+
 async function send(text){
   text = (text || '').trim();
   if (!text || busy) return;
@@ -2454,7 +2567,19 @@ async function send(text){
   }
 
   // Arithmetic, conversions and timers are answered exactly, not generated.
+  // Evaluated once and once only: skillHandle SETS timers as a side effect, so
+  // calling it twice to test it would arm two.
   const skilled = skillHandle(text);
+
+  // "research X" takes its own path: the server searches the vault and the
+  // offline archive before it generates, and files what comes back. Skills win
+  // where they overlap, so "look up 12 * 40" stays arithmetic.
+  const wantsResearch = !skilled && text.match(RE_RESEARCH);
+  if (wantsResearch){
+    await doResearch(text, wantsResearch[1].trim());
+    return;
+  }
+
   if (skilled){
     bubble('user', text);
     bubble('bot', skilled);

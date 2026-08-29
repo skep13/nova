@@ -22,11 +22,13 @@ remote failure lands straight back on local rather than surfacing an error.
 """
 import bisect
 import datetime
+import html
 import json
 import math
 import os
 import pathlib
 import re
+import urllib.parse
 import time
 
 import aiohttp
@@ -837,7 +839,12 @@ def load_vault(force=False):
             body = re.sub(r"^#\s+.+$", "", body, count=1, flags=re.M).strip()
             if not body or len(body) <= FACT_MAX:
                 continue                      # a fact, handled in the browser
-            notes.append({"file": p.name, "title": title or p.stem, "body": body})
+            # Flagged at load so retrieval can tell what the assistant wrote
+            # from what a person or the archive did. Only /research acts on it.
+            generated = bool(fm and re.search(r"^tags:.*\bresearch\b",
+                                              fm.group(1), re.M))
+            notes.append({"file": p.name, "title": title or p.stem, "body": body,
+                          "generated": generated})
     except Exception:
         pass
     _vault, _vault_stamp = notes, stamp
@@ -916,8 +923,13 @@ def _build_index():
     return df
 
 
-def search_vault(query):
-    """Best matching note, as a 900-char excerpt centred on the match."""
+def search_vault(query, allow_generated=True):
+    """Best matching note, as a 900-char excerpt centred on the match.
+
+    allow_generated=False excludes notes the assistant wrote itself. Chat wants
+    them — they are part of the vault. Research must not have them, or it ends
+    up citing its own previous output as a source.
+    """
     load_vault()
     raw_terms = key_terms(query)
     terms = [_stem(w) for w in raw_terms]
@@ -928,6 +940,8 @@ def search_vault(query):
 
     best, best_score = None, 0.0
     for n in _vault:
+        if not allow_generated and n.get("generated"):
+            continue
         score = 0.0
         for w in terms:
             if w not in n["_tw"] and w not in n["_bw"] and w not in n["_al"]:
@@ -941,6 +955,15 @@ def search_vault(query):
             # acronym is a name for the thing, not a mention of it.
             weight = 4.0 if w in n["_al"] else (3.0 if w in n["_tw"] else 1.0)
             score += rarity * weight
+        # A note the assistant wrote itself loses a close contest to one a
+        # person wrote or the archive supplied. It is still findable — often it
+        # is the only thing covering a question — but it must not displace the
+        # hand-written field notes, which lead with what to DO and are the
+        # reason this device exists. Being generated is a reason to rank
+        # second, not a reason to be invisible.
+        if n.get("generated"):
+            score *= 0.7
+
         if score > best_score:
             best, best_score = n, score
 
@@ -1019,6 +1042,350 @@ async def agents(request):
 
 
 app = web.Application(client_max_size=8 * 1024 * 1024)
+# --- research: look it up, write it up, file it -----------------------------
+# The offline Wikipedia is already on the disk for the assistant to quote from.
+# This turns it into something that accumulates: ask a question, and the answer
+# becomes a note in the vault, cross-linked into everything already there.
+#
+# Reached directly rather than through nginx's /wiki/ proxy — this container is
+# on the same docker network as kiwix, so there is no reason to make the request
+# leave and come back.
+WIKI_URL = os.environ.get("WIKI_URL", "http://kiwix:8080")
+RESEARCH_SOURCES = int(os.environ.get("RESEARCH_SOURCES", "3"))
+RESEARCH_SOURCE_CHARS = int(os.environ.get("RESEARCH_SOURCE_CHARS", "2600"))
+RESEARCH_MAX_TOKENS = int(os.environ.get("RESEARCH_MAX_TOKENS", "900"))
+
+
+async def wiki_search(session, query, limit):
+    """Article titles and hrefs for a query, from the offline archive."""
+    url = (WIKI_URL + "/search?books.filter.lang=eng&pattern="
+           + urllib.parse.quote(query) + "&userlang=en")
+    try:
+        async with session.get(url) as r:
+            if r.status != 200:
+                return []
+            page = await r.text()
+    except Exception:
+        return []
+
+    out, seen = [], set()
+    for href, label in re.findall(
+            r'<a[^>]+href="([^"]*/content/[^"]*)"[^>]*>(.*?)</a>', page, re.S):
+        title = html.unescape(re.sub(r"<[^>]*>", "", label)).strip()
+        if not title or title.lower() in seen:
+            continue
+        seen.add(title.lower())
+        out.append((title, html.unescape(href)))
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def wiki_article(session, href, limit):
+    """The opening prose of an article, stripped of markup."""
+    try:
+        async with session.get(WIKI_URL + href) as r:
+            if r.status != 200:
+                return ""
+            art = await r.text()
+    except Exception:
+        return ""
+
+    art = re.sub(r"(?is)<style.*?</style>", " ", art)
+    art = re.sub(r"(?is)<script.*?</script>", " ", art)
+    art = re.sub(r"(?is)<table.*?</table>", " ", art)
+    paras, total = [], 0
+    for p in re.findall(r"(?is)<p\b[^>]*>(.*?)</p>", art):
+        p = html.unescape(re.sub(r"(?s)<[^>]+>", "", p))
+        p = re.sub(r"\[\d+\]", "", p)
+        p = re.sub(r"\s+", " ", p).strip()
+        if len(p) < 60:
+            continue
+        paras.append(p)
+        total += len(p)
+        if total > limit:
+            break
+    return "\n\n".join(paras)
+
+
+def autolink(text):
+    """Turn mentions of existing notes into wikilinks.
+
+    Written as [[stem|Display Text]] because Obsidian resolves a link against
+    the FILE NAME, and these files are slugs while the prose is not. Writing
+    [[operating system]] against operating-system.md is what left 1308 links in
+    this vault pointing at nothing.
+
+    One link per target per note. Linking every occurrence turns a paragraph
+    into a wall of blue and tells the graph nothing it did not already know
+    from the first mention.
+    """
+    load_vault()
+
+    # A one-word title only earns a link if the word is RARE in the vault.
+    # "Process" is a real note, and linking every prose use of the word buries
+    # the graph in edges that carry no meaning — the first research note wrote
+    # [[process|process]] about a timing attack. Multi-word titles are specific
+    # enough by construction, so only the single-word case is filtered.
+    df = _build_index()
+    total = max(1, len(_vault))
+    common = total * 0.08
+
+    targets = []
+    for n in _vault:
+        title = (n.get("title") or "").strip()
+        stem = n["file"][:-3] if n["file"].endswith(".md") else n["file"]
+        if len(title) < 6:
+            continue
+        if " " not in title and df.get(_stem(title.lower()), 0) > common:
+            continue
+        targets.append((title, stem))
+    targets.sort(key=lambda t: len(t[0]), reverse=True)   # longest wins first
+
+    used = set()
+    for title, stem in targets:
+        if stem in used:
+            continue
+        pat = re.compile(r"(?<!\[)\b(" + re.escape(title) + r")\b(?!\])", re.I)
+        m = pat.search(text)
+        if m:
+            text = text[:m.start()] + "[[" + stem + "|" + m.group(1) + "]]" + text[m.end():]
+            used.add(stem)
+    return text, sorted(used)
+
+
+def rank_articles(question, candidates):
+    """Order candidate articles by how much of the question their title covers.
+
+    Wikipedia titles are concept names, so overlap with a title says the
+    article is ABOUT the thing asked. Overlap with a body mostly says the
+    article is long. Stemmed so "timing" reaches "timings".
+    """
+    want = {_stem(w) for w in key_terms(question)}
+    if not want:
+        return candidates
+
+    scored = []
+    for i, (title, href) in enumerate(candidates):
+        have = {_stem(w) for w in key_terms(title)}
+        overlap = len(want & have)
+        # Ties break toward the archive's own ranking, and toward shorter
+        # titles — "Timing attack" over "Man-on-the-side attack" when both
+        # match one term, because the shorter title is less diluted.
+        scored.append((-overlap, len(have), i, title, href))
+    scored.sort()
+    return [(t, h) for _o, _l, _i, t, h in scored]
+
+
+async def gather_sources(question):
+    """Everything known about a question, before any model is involved."""
+    vault_hit = search_vault(question, allow_generated=False)
+
+    # Three angles on the same question. The raw sentence is what a person
+    # typed; the key terms are what the archive can actually match on; the
+    # vault note's title is a query already known to be on-topic, which is the
+    # strongest of the three when there is a hit.
+    queries = [question]
+    terms = " ".join(key_terms(question))
+    if terms and terms.lower() != question.lower():
+        queries.append(terms)
+    if vault_hit:
+        queries.append(vault_hit["title"])
+
+    candidates, seen = [], set()
+    articles = []
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        for q in queries:
+            for title, href in await wiki_search(s, q, RESEARCH_SOURCES + 3):
+                if title.lower() in seen:
+                    continue
+                seen.add(title.lower())
+                candidates.append((title, href))
+
+        ranked = rank_articles(question, candidates)
+        # Once something matches two of the question's terms, anything matching
+        # one is noise — "Secret sharing" against "how does a timing attack
+        # recover a secret key". Feeding it in anyway costs 2600 characters of
+        # off-topic text and invites the model to drift toward it.
+        want = {_stem(w) for w in key_terms(question)}
+        if want:
+            cover = {t: len(want & {_stem(w) for w in key_terms(t)}) for t, _ in ranked}
+            if cover and max(cover.values()) >= 2:
+                ranked = [(t, h) for t, h in ranked if cover[t] >= 2]
+
+        for title, href in ranked:
+            if len(articles) >= RESEARCH_SOURCES:
+                break
+            body = await wiki_article(s, href, RESEARCH_SOURCE_CHARS)
+            if len(body) >= 200:
+                articles.append({"title": title, "text": body})
+    return vault_hit, articles
+
+
+def research_prompt(question, vault_hit, articles):
+    parts = []
+    if vault_hit:
+        parts.append(f"From your existing notes, note titled \"{vault_hit['title']}\":\n"
+                     + vault_hit["text"])
+    for a in articles:
+        parts.append(f"From the offline Wikipedia, article \"{a['title']}\":\n" + a["text"])
+
+    system = (
+        "You are writing a study note for someone's personal knowledge vault. "
+        "Write ONLY from the source material given to you. Do not add facts, "
+        "figures, dates or names that are not in the sources. If the sources do "
+        "not cover part of the question, say so in one short sentence rather "
+        "than filling the gap. Write clear prose in short paragraphs, no "
+        "preamble, no bullet-point summary at the end, and do not mention that "
+        "you were given sources."
+    )
+    user = (f"Write a note answering: {question}\n\n"
+            "Source material:\n\n" + "\n\n---\n\n".join(parts))
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user}]
+
+
+def research_note(question, title, answer, vault_hit, articles, agent_name, model):
+    """File the answer as a note, and be honest in it about where it came from.
+
+    An excerpt of this note may be served back as an answer long after anyone
+    remembers it was generated, so the provenance line is the FIRST thing in
+    the body — a 900-character excerpt window taken from the top carries it,
+    and the frontmatter carries it regardless.
+    """
+    linked, links = autolink(answer.strip())
+    now = datetime.datetime.now()
+
+    tags = ["research", "reference"]
+    # Inherit the domain of the note it drew on, so it lands in the same map of
+    # content rather than floating outside the hub layer.
+    if vault_hit:
+        for n in _vault:
+            if n["file"] == vault_hit["file"]:
+                head = (VAULT_DIR / n["file"]).read_text(encoding="utf-8",
+                                                         errors="replace")[:400]
+                g = re.search(r"^tags:\s*\[(.*)\]", head, re.M)
+                if g:
+                    for t in (x.strip() for x in g.group(1).split(",")):
+                        if t in ("ai", "security", "cs", "field") and t not in tags:
+                            tags.insert(0, t)
+                break
+
+    sources = [f"offline Wikipedia: {a['title']}" for a in articles]
+    if vault_hit:
+        sources.insert(0, f"vault: {vault_hit['title']}")
+
+    stem = "research-" + slug(title, 52)
+    path = VAULT_DIR / (stem + ".md")
+    # Never clobber something a person wrote or uploaded. Re-researching the
+    # same question overwrites the previous research note deliberately —
+    # otherwise asking twice quietly doubles the vault.
+    if path.exists():
+        head = path.read_text(encoding="utf-8", errors="replace")[:400]
+        existing = re.search(r"^tags:\s*\[(.*)\]", head, re.M)
+        if not existing or "research" not in existing.group(1):
+            path = VAULT_DIR / f"{stem}-{now.strftime('%H%M%S')}.md"
+
+    doc = ("---\n"
+           f"created: {now.isoformat(timespec='seconds')}\n"
+           f"title: {title}\n"
+           f"tags: [{', '.join(tags)}]\n"
+           f"question: {question}\n"
+           f"written_by: {agent_name}" + (f"/{model}" if model else "") + "\n"
+           f"sources: {'; '.join(sources) if sources else 'none'}\n"
+           "---\n\n"
+           f"# {title}\n\n"
+           f"*Written by Orb's {agent_name} model from "
+           f"{'the sources named above' if sources else 'no sources'}, "
+           f"{now.strftime('%-d %B %Y')}. Not independently checked.*\n\n"
+           f"{linked}\n")
+    if sources:
+        doc += "\n## Sources\n\n" + "\n".join(f"- {s}" for s in sources) + "\n"
+    if links:
+        doc += "\nSee also: " + ", ".join(f"[[{s}]]" for s in links[:10]) + "\n"
+
+    VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(doc, encoding="utf-8")
+    load_vault(force=True)       # findable immediately, without waiting on mtime
+    return path.name, links, sources
+
+
+async def research(request):
+    payload = await request.json()
+    question = (payload.get("q") or "").strip()
+    if not question:
+        return web.json_response({"error": "no question given"}, status=400)
+
+    want = payload.get("agent", "local") or "local"
+    agent = BY_NAME.get(want, BY_NAME["local"])
+    if not available(agent):
+        agent = BY_NAME["local"]
+
+    vault_hit, articles = await gather_sources(question)
+    if not vault_hit and not articles:
+        return web.json_response(
+            {"error": "nothing found for that in the vault or the offline archive"},
+            status=404)
+
+    title = question.rstrip("?").strip()
+    title = title[:1].upper() + title[1:]
+    messages = research_prompt(question, vault_hit, articles)
+
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-cache",
+                                       "X-Accel-Buffering": "no"})
+    collected = []
+    used_agent, used_model = agent["name"], agent.get("model")
+
+    try:
+        if agent["name"] != "local":
+            body = remote_payload(agent, {"messages": messages, "stream": True})
+            body["max_tokens"] = RESEARCH_MAX_TOKENS
+            key = read_key(agent["name"])
+            await relay(agent["url"], body,
+                        {"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                        request, resp, collected, TIMEOUT_S)
+            note_success(agent["name"])
+        else:
+            raise RuntimeError("local")
+    except Exception as exc:
+        if agent["name"] != "local" and str(exc) != "local":
+            note_failure(agent["name"], str(exc))
+        if not resp.prepared:
+            collected, used_agent, used_model = [], "local", None
+            await relay(LOCAL_URL,
+                        {"messages": messages, "stream": True,
+                         "max_tokens": RESEARCH_MAX_TOKENS},
+                        None, request, resp, collected, 900)
+
+    answer = "".join(collected).strip()
+    if not resp.prepared:
+        await resp.prepare(request)
+
+    note = links = None
+    sources = []
+    if answer:
+        try:
+            note, links, sources = research_note(
+                question, title, answer, vault_hit, articles, used_agent, used_model)
+        except Exception:
+            pass                              # an unsaved answer still answers
+        log_exchange(question, answer, f"research/{used_agent}", used_model)
+
+    # A trailing event the page reads to show what was filed. Shaped like an
+    # OpenAI chunk with an extra key, so a parser that does not know about it
+    # sees an empty delta and ignores it rather than breaking.
+    await resp.write(("data: " + json.dumps({
+        "choices": [{"index": 0, "delta": {}}],
+        "orb_note": {"file": note, "title": title, "sources": sources,
+                     "links": links or [], "agent": used_agent},
+    }) + "\n\n").encode())
+    await resp.write(b"data: [DONE]\n\n")
+    return resp
+
+
 app.add_routes([
     web.post("/v1/chat/completions", chat),
     web.get("/agents", agents),
@@ -1026,6 +1393,7 @@ app.add_routes([
     web.get("/place", place),
     web.get("/recall", recall),
     web.post("/ingest", ingest),
+    web.post("/research", research),
 ])
 
 if __name__ == "__main__":

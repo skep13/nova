@@ -139,6 +139,46 @@ the store with junk, and junk enters every prompt.
 As everywhere else here, **the model never decides what to remember** — capture
 and retrieval are both deterministic, in the browser, before it is invoked.
 
+## Research: the vault writes itself
+
+Say **"research X"**, **"look up X"** or **"make a note on X"** and Orb searches
+its own notes and the offline Wikipedia, writes the answer up, files it in the
+vault, and streams it back. The note is cross-linked into everything already
+there, so the graph grows with it.
+
+Also `read up on X`, `study up on X`, `write a note about X`. It is deliberately
+**only** these explicit verbs — every ordinary question would qualify as
+something worth reading up on, and a vault that files a note on each of them
+stops being a second brain within a week.
+
+Same principle as everywhere else here: **the model never decides to search.**
+It is not asked whether to look something up, what to look it up under, or
+whether to save the result. The server queries the archive three ways (the raw
+question, its key terms, and the title of the best matching note), ranks the
+candidates by how much of the question their titles cover, and hands the model
+only the text it found. The model's one job is to write prose from it, which is
+the thing a 3B does well. There is no agent loop, so it cannot pick the wrong
+tool — it never picks.
+
+Two rules keep this from rotting the vault:
+
+- **It cannot ground on its own output.** Ask the same question twice and the
+  first note would otherwise be the best vault match for the second, so each
+  pass would launder the last one's mistakes into a cited source. Generated
+  notes are barred from being research sources — though they stay fully
+  searchable in chat.
+- **A generated note loses a close contest.** In retrieval its score is scaled
+  by 0.7, so a hand-written field note wins where both match. Being written by
+  a model is a reason to rank second, not a reason to be invisible.
+
+Every research note says in its first line that a model wrote it, names the
+sources in its frontmatter, and is tagged `research`. Provenance has to survive
+being excerpted, because a 900-character window served back as an answer months
+later carries no other context.
+
+Expect **~170 s on the local model** for a 900-token note and a few seconds on a
+hosted agent. It streams, so text appears as it arrives.
+
 ## Grounding: offline Wikipedia
 
 A 1.5B model invents plausible-sounding facts. The single cheapest accuracy
