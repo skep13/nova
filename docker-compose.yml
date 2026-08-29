@@ -159,7 +159,21 @@ services:
     restart: unless-stopped
     command: ["--config", "/config/config.yml"]
     volumes:
-      - ./mem:/data
+      # Mounted one level down, at /data/Orb rather than /data, so the vault
+      # appears over WebDAV as /dav/Orb/ and not /dav/.
+      #
+      # This is to match Remotely Save, which uses the VAULT NAME as its remote
+      # base directory when the "remote base directory" box is left empty — the
+      # empty field means "default", not "root". Its own connection test proved
+      # it: probe files landed at /dav/Orb/rs-test-folder-*/ while all 309 notes
+      # sat at /dav/, so the plugin connected successfully and then synced an
+      # empty directory.
+      #
+      # Doing it here rather than by moving the notes keeps /opt/orb/mem as the
+      # single vault path that everything else already uses — the router's
+      # search, /ingest uploads, the page's fact store and the nightly backup
+      # all stay pointed at exactly the same directory they were before.
+      - ./mem:/data/Orb
       - ./webdav:/config:ro
     deploy:
       resources:

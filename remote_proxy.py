@@ -774,9 +774,28 @@ _vault = []               # [{file, title, body, mtime}]
 _vault_stamp = 0.0
 
 
+def _vault_files():
+    """Every note in the vault, at any depth.
+
+    Recursive because an Obsidian vault has folders, and Remotely Save creates
+    one named after the vault unless told otherwise. A top-level-only glob made
+    those notes invisible: the vault looked synced and the assistant knew
+    nothing about any of it.
+
+    Obsidian's own machinery is skipped. .obsidian holds JSON config, and
+    .trash holds notes the user deleted — resurrecting those in answers would
+    be its own kind of wrong.
+    """
+    skip = {".obsidian", ".trash", ".git", "node_modules"}
+    for p in VAULT_DIR.rglob("*.md"):
+        if any(part in skip or part.startswith(".") for part in p.relative_to(VAULT_DIR).parts[:-1]):
+            continue
+        yield p
+
+
 def _vault_mtime():
     try:
-        return max((p.stat().st_mtime for p in VAULT_DIR.glob("*.md")), default=0.0)
+        return max((p.stat().st_mtime for p in _vault_files()), default=0.0)
     except Exception:
         return 0.0
 
@@ -793,7 +812,7 @@ def load_vault(force=False):
         return
     notes = []
     try:
-        for p in sorted(VAULT_DIR.glob("*.md")):
+        for p in sorted(_vault_files()):
             try:
                 raw = p.read_text(encoding="utf-8", errors="replace")
             except Exception:
@@ -805,6 +824,13 @@ def load_vault(force=False):
                 t = re.search(r"^title:\s*(.+)$", fm.group(1), re.M)
                 if t:
                     title = t.group(1).strip()
+                # Maps of content are skipped. They exist to give the Obsidian
+                # graph a hub structure, and as a search result a hub is the
+                # worst possible hit: a list of links mentioning every term in
+                # its topic, which outranks the one note that answers the
+                # question and then answers with an index instead of a fact.
+                if re.search(r"^tags:.*\bmoc\b", fm.group(1), re.M):
+                    continue
             h = re.search(r"^#\s+(.+)$", body, re.M)
             if not title and h:
                 title = h.group(1).strip()
