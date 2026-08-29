@@ -1,4 +1,4 @@
-# Orb
+# Nova
 
 Voice chat UI for a local 3B model on a ThinkPad T470 (Proxmox, 8 GB RAM,
 i5-6300U). Designed for a landscape, wrist-mounted iPhone reached over Tailscale.
@@ -141,7 +141,7 @@ and retrieval are both deterministic, in the browser, before it is invoked.
 
 ## Research: the vault writes itself
 
-Say **"research X"**, **"look up X"** or **"make a note on X"** and Orb searches
+Say **"research X"**, **"look up X"** or **"make a note on X"** and Nova searches
 its own notes and the offline Wikipedia, writes the answer up, files it in the
 vault, and streams it back. The note is cross-linked into everything already
 there, so the graph grows with it.

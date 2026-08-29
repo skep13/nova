@@ -129,7 +129,7 @@ services:
       # Nominatim's usage policy requires an identifying User-Agent and no more
       # than one request a second. Both are enforced in the router rather than
       # trusted to the browser.
-      - GEOCODE_UA=Orb/1.0 (self-hosted personal assistant)
+      - GEOCODE_UA=Nova/1.0 (self-hosted personal assistant)
     volumes:
       - ./logs:/logs
       - ./keys:/run/keys:ro
