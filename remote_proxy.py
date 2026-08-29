@@ -1181,6 +1181,22 @@ async def gather_sources(question):
     """Everything known about a question, before any model is involved."""
     vault_hit = search_vault(question, allow_generated=False)
 
+    # The vault hit has to be about the question, not merely to contain its
+    # words. Chat retrieval scores the body, which is right there — an aside
+    # buried in a long note is often exactly what was wanted. For research it
+    # is not enough: "zzqqxx nonexistent topic zzqq" matched
+    # "Retrieval-augmented generation" on the word "topic" and scored 5.74,
+    # comfortably over the threshold, which was enough to make the endpoint
+    # generate and file a note about nothing.
+    #
+    # Requiring a shared word in the TITLE is the same test already applied to
+    # archive articles, and it needs no tuned constant: a title is the concept
+    # name, so overlap with it means aboutness rather than coincidence.
+    if vault_hit:
+        q_terms = {_stem(w) for w in key_terms(question)}
+        if q_terms and not (q_terms & {_stem(w) for w in key_terms(vault_hit["title"])}):
+            vault_hit = None
+
     # Three angles on the same question. The raw sentence is what a person
     # typed; the key terms are what the archive can actually match on; the
     # vault note's title is a query already known to be on-topic, which is the
@@ -1204,15 +1220,29 @@ async def gather_sources(question):
                 candidates.append((title, href))
 
         ranked = rank_articles(question, candidates)
-        # Once something matches two of the question's terms, anything matching
-        # one is noise — "Secret sharing" against "how does a timing attack
-        # recover a secret key". Feeding it in anyway costs 2600 characters of
-        # off-topic text and invites the model to drift toward it.
         want = {_stem(w) for w in key_terms(question)}
         if want:
             cover = {t: len(want & {_stem(w) for w in key_terms(t)}) for t, _ in ranked}
-            if cover and max(cover.values()) >= 2:
-                ranked = [(t, h) for t, h in ranked if cover[t] >= 2]
+
+            # A relevance floor. kiwix does full-text search, so it returns
+            # SOMETHING for almost any string — ask it about nonsense and it
+            # supplies three articles sharing one common word, which is enough
+            # for the model to write a confident note about nothing and file it
+            # next to the real ones. A title with no term in common with the
+            # question is not a source.
+            #
+            # And once something matches TWO terms, anything matching one is
+            # noise: "Secret sharing" against "how does a timing attack recover
+            # a secret key" costs 2600 characters of off-topic text and invites
+            # the model to drift toward it.
+            # How much overlap is required scales with how much was asked. One
+            # shared word out of two is a match; one out of five is a
+            # coincidence — "zzqqxx nonexistent topic zzqq" reached an article
+            # titled "Topic" and that was enough to clear a flat floor of one.
+            need = 2 if len(want) >= 3 else 1
+            best = max(cover.values()) if cover else 0
+            floor = max(need, min(best, 2))
+            ranked = [(t, h) for t, h in ranked if cover.get(t, 0) >= floor]
 
         for title, href in ranked:
             if len(articles) >= RESEARCH_SOURCES:

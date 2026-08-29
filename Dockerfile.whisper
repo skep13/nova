@@ -20,9 +20,21 @@ RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp .
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
  && cmake --build build --config Release -j"$(nproc)" --target whisper-server
 
-# tiny.en is ~75 MB and plenty for short spoken prompts. Swap for base.en
-# (~150 MB) if accuracy on names or jargon matters more than latency.
-RUN sh ./models/download-ggml-model.sh tiny.en
+# base.en, not tiny.en. Measured on this box by speaking synthesised phrases
+# back through the transcriber, tiny.en heard:
+#
+#   "radio check"              -> "Rate it O check."
+#   "what is my grid reference" -> "What is my great reference?"
+#
+# The second one is disqualifying rather than merely untidy. "Grid reference"
+# is a command the page matches with a regex before the model is ever involved,
+# so a mis-hearing does not degrade the answer, it silently loses the feature —
+# and losing it on a search-and-rescue device costs exactly when it matters.
+#
+# base.en is ~150 MB against tiny's ~75 MB and roughly twice the compute, which
+# is affordable here: transcription is a one-shot on a few seconds of audio and
+# never runs while the model is generating.
+RUN sh ./models/download-ggml-model.sh base.en
 
 
 FROM debian:bookworm-slim
@@ -31,10 +43,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/build/bin/whisper-server /usr/local/bin/whisper-server
-COPY --from=build /src/models/ggml-tiny.en.bin  /models/ggml-tiny.en.bin
+COPY --from=build /src/models/ggml-base.en.bin  /models/ggml-base.en.bin
 
 EXPOSE 8080
 # -t 2 matches the i5-6300U's physical cores; STT and generation never run at
 # the same moment, so they are not really competing.
-CMD ["whisper-server", "-m", "/models/ggml-tiny.en.bin", \
+CMD ["whisper-server", "-m", "/models/ggml-base.en.bin", \
      "--host", "0.0.0.0", "--port", "8080", "-t", "2"]

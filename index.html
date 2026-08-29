@@ -1889,7 +1889,12 @@ const RE_GREET    = /^\s*(?:hello|hi|hiya|hey|yo|howdy|greetings|good\s+(?:morni
 // Position questions never reach the model: it has no sensors, and a model
 // asked "where am I" will cheerfully invent somewhere.
 const RE_WHERE    = /^\s*(?:where\s+am\s+i|where\s+are\s+we|what(?:'?s|\s+is)?\s+my\s+(?:location|position|grid(?:\s*ref(?:erence)?)?|co-?ordinates)|my\s+(?:location|position|coordinates)|grid\s*ref(?:erence)?|location|position)\s*[?.!]*\s*$/i;
-const RE_MARK     = /^\s*(?:mark\s+(?:this\s+)?(?:spot|point|position|place)|drop\s+a\s+pin|save\s+(?:this\s+)?(?:spot|position)|pin\s+this)\s*[?.!]*\s*$/i;
+// "this" or "the": dictation does not reliably distinguish them. Measured —
+// "mark this spot" spoken into whisper base.en comes back as "Mark the spot",
+// which failed this pattern and silently dropped the command. A position
+// command that works only when the transcriber hears one particular
+// determiner is not a command, and the two readings mean the same thing here.
+const RE_MARK     = /^\s*(?:mark\s+(?:(?:this|the)\s+)?(?:spot|point|position|place)|drop\s+a\s+pin|save\s+(?:(?:this|the)\s+)?(?:spot|position)|pin\s+this)\s*[?.!]*\s*$/i;
 const RE_TOPIN    = /^\s*(?:(?:back|way|bearing|distance)\s+to\s+(?:the\s+)?pin|where'?s?\s+(?:the\s+)?pin|return\s+to\s+(?:the\s+)?pin|how\s+far\s+(?:is\s+)?(?:the\s+)?pin)\s*[?.!]*\s*$/i;
 
 // Research is opt-in by an explicit verb, never inferred from the shape of a
@@ -2834,16 +2839,47 @@ if (MODE === 'webspeech'){
     } catch {}
   };
 
+  /* End of turn, decided here rather than by Safari.
+   *
+   * With continuous = false, webkitSpeechRecognition is supposed to end itself
+   * once you stop talking. On Safari it frequently does not: the session stays
+   * open until something else happens to the page, so the orb sits listening
+   * and the user has to tap the screen to make it notice they finished. That
+   * tap is the thing this device exists to avoid — the whole point is talking
+   * to it without looking at it.
+   *
+   * So the gap between interim results is timed instead. Safari emits them
+   * steadily while it hears speech and stops emitting when speech stops, which
+   * makes "no new result for a while" a reliable proxy for end of utterance
+   * without any access to the audio itself.
+   *
+   * setTimeout, deliberately, and not requestAnimationFrame: rAF is tied to
+   * the display and stops when the screen dims, which would reintroduce the
+   * same "press the screen to finish" behaviour by a different route. */
+  const SPEECH_IDLE_MS = 1500;   // quiet after speech has been heard
+  const NO_SPEECH_MS   = 8000;   // before a single word has arrived
+  let idleTimer = 0;
+  const armIdle = (ms) => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { try { recog.stop(); } catch {} }, ms);
+  };
+  const disarmIdle = () => { clearTimeout(idleTimer); idleTimer = 0; };
+
   const origOnStart = recog.onstart;
   recog.onstart = (e) => {
     startedAtMs = Date.now(); sawAnyResult = false; sawError = false;
+    // Longer before the first word: tapping the mic and pausing to think is
+    // normal, and cutting that off after a second and a half is worse than
+    // waiting.
+    armIdle(NO_SPEECH_MS);
     diag('start');
     origOnStart(e);
   };
   const origOnResult = recog.onresult;
-  recog.onresult = (e) => { sawAnyResult = true; origOnResult(e); };
+  recog.onresult = (e) => { sawAnyResult = true; armIdle(SPEECH_IDLE_MS); origOnResult(e); };
   const origOnError = recog.onerror;
   recog.onerror = (e) => {
+    disarmIdle();
     sawError = true;
     // startedAtMs is 0 when the error beats onstart, which is exactly the
     // interesting case — reporting Date.now() there logged an epoch timestamp
@@ -2853,6 +2889,7 @@ if (MODE === 'webspeech'){
   };
 
   recog.onend = () => {
+    disarmIdle();
     listening = false;
     if (finalText.trim()){ sfx('stop'); send(finalText); return; }
     if (busy) return;
@@ -2873,9 +2910,21 @@ if (MODE === 'webspeech'){
 }
 
 /* ---- record + server whisper (non-Safari fallback) ---- */
-let audioCtx=null, micStream=null, procNode=null, analyser=null, chunks=[], rafId=0;
-let sawSpeech=false, quietSince=0, startedAt=0;
+// No AnalyserNode any more: it existed to feed the frame loop's level meter,
+// and the level now comes off the audio thread, which is the only place that
+// keeps running with the screen dark.
+let audioCtx=null, micStream=null, procNode=null, chunks=[], rafId=0;
+let sawSpeech=false, quietSince=0, startedAt=0, lastPeak=0;
 const SILENCE_MS = 1300, MAX_MS = 25000, SPEECH_LVL = .085;
+
+/* The page already holds a screen wake lock (see keepAwake, above) and
+   re-requests it whenever the tab becomes visible, so there is nothing extra
+   to take here. Left as a no-op rather than removing the call sites: the
+   recorder should not silently depend on a lock that a browser is free to
+   refuse — no secure context, low battery, Safari before 16.4 — and the
+   silence detection below is written to work without one either way. */
+function holdScreenAwake(){ keepAwake(); }
+function releaseScreen(){ /* the global lock is not ours to release */ }
 
 async function startRecording(){
   try {
@@ -2886,39 +2935,68 @@ async function startRecording(){
 
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const src = audioCtx.createMediaStreamSource(micStream);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 512;
-  src.connect(analyser);
 
   chunks = []; sawSpeech = false; quietSince = 0; startedAt = performance.now();
-  procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-  procNode.onaudioprocess = (e) => { chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
-  src.connect(procNode);
-  procNode.connect(audioCtx.destination);   // silent, but must be connected to fire
-
+  lastPeak = 0;
+  // Set before the node is wired up, not after: onaudioprocess drops buffers
+  // while this is false, and the first one carries the start of the first word.
   listening = true;
-  setState('listening', 'listening');
+  procNode = audioCtx.createScriptProcessor(4096, 1, 1);
 
-  const bins = new Uint8Array(analyser.frequencyBinCount);
-  (function meter(){
+  // End-of-speech is decided HERE, on the audio thread, not in the animation
+  // frame below.
+  //
+  // requestAnimationFrame is tied to the display. On a wrist the screen dims
+  // within seconds, rAF stops firing, and the silence timer stops advancing —
+  // so the recording ran on until the screen was touched, at which point rAF
+  // resumed, instantly saw the silence, and stopped. That is exactly the
+  // "I have to press the screen to finish speaking" symptom, and it is worst
+  // in the case the device is FOR: talking to it without looking at it.
+  //
+  // onaudioprocess is driven by the audio clock and keeps firing with the
+  // display off, so the same 1300 ms of quiet now ends the turn whether or not
+  // anyone is touching anything. The frame loop is left with the one job it is
+  // actually suited to: drawing.
+  procNode.onaudioprocess = (e) => {
     if (!listening) return;
-    analyser.getByteTimeDomainData(bins);
+    const d = e.inputBuffer.getChannelData(0);
+    chunks.push(new Float32Array(d));
+
     let peak = 0;
-    for (let i = 0; i < bins.length; i++) peak = Math.max(peak, Math.abs(bins[i]-128)/128);
-    pulse(Math.min(1, peak * 2.4));
+    for (let i = 0; i < d.length; i++){
+      const v = d[i] < 0 ? -d[i] : d[i];
+      if (v > peak) peak = v;
+    }
+    lastPeak = peak;               // handed to the meter for drawing only
+
     const now = performance.now();
     if (peak > SPEECH_LVL){ sawSpeech = true; quietSince = 0; }
     else if (sawSpeech){
       if (!quietSince) quietSince = now;
       else if (now - quietSince > SILENCE_MS){ stopRecording(); return; }
     }
-    if (now - startedAt > MAX_MS){ stopRecording(); return; }
+    if (now - startedAt > MAX_MS) stopRecording();
+  };
+  src.connect(procNode);
+  procNode.connect(audioCtx.destination);   // silent, but must be connected to fire
+
+  setState('listening', 'listening');
+  holdScreenAwake();               // best effort; the fix above does not rely on it
+
+  (function meter(){
+    if (!listening) return;
+    pulse(Math.min(1, lastPeak * 2.4));
     rafId = requestAnimationFrame(meter);
   })();
 }
 
 async function stopRecording(){
+  // Re-entrancy guard. Two independent clocks can now call this — the audio
+  // thread on silence, and the max-length check — and a second pass would find
+  // the buffers already torn down and NaN its way through the encode.
+  if (!listening) return;
   listening = false;
+  releaseScreen();
   cancelAnimationFrame(rafId);
   if (procNode){ procNode.disconnect(); procNode.onaudioprocess = null; procNode = null; }
   if (micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }

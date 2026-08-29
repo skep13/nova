@@ -254,13 +254,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.whisper
-    image: orb-whisper:tiny-en
+    image: orb-whisper:base-en
     container_name: orb-whisper
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          memory: 320m
+          # Raised from 320m with the move from tiny.en to base.en: the weights
+          # go ~75 MB -> ~150 MB and the decode buffers grow with them. There is
+          # room — the host sits around 2.4 GB of 5 GB used — and the alternative
+          # was a transcriber that heard "grid reference" as "great reference",
+          # which silently disables the position command that matches on it.
+          memory: 500m
 
 volumes:
   models:
