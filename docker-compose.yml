@@ -4,7 +4,11 @@ services:
     container_name: orb-llama
     restart: unless-stopped
     volumes:
-      - models:/root/.cache/llama.cpp
+      # /root/.cache/huggingface, NOT /root/.cache/llama.cpp. The volume was
+      # mounted at the latter and llama.cpp caches to the former, so it held
+      # nothing and every container recreate re-downloaded 1.8 GB into the
+      # writable layer — where it was then thrown away with the container.
+      - models:/root/.cache/huggingface
     # Upgraded from Qwen2.5-1.5B when the host went 4 GB -> 8 GB.
     # Measured on this hardware: 3B = 8.3 tok/s, 1.5B = 16.5 tok/s — exactly
     # half. Kept anyway, because throughput is not the binding constraint:
@@ -49,7 +53,11 @@ services:
     container_name: orb-embed
     restart: unless-stopped
     volumes:
-      - models:/root/.cache/llama.cpp
+      # /root/.cache/huggingface, NOT /root/.cache/llama.cpp. The volume was
+      # mounted at the latter and llama.cpp caches to the former, so it held
+      # nothing and every container recreate re-downloaded 1.8 GB into the
+      # writable layer — where it was then thrown away with the container.
+      - models:/root/.cache/huggingface
     # --pooling mean is required: BERT-family embedding models have no
     # last-token semantics to pool from, and the default returns nonsense
     # vectors that still look like valid floats.

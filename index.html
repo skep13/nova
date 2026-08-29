@@ -1033,7 +1033,13 @@ function pulse(v){ ampVal = Math.min(1, Math.max(ampVal, v)); applyAmp(); }
 setInterval(() => { if (ampVal > .001){ ampVal *= .86; applyAmp(); } }, 55);
 
 function idleHint(){
-  if (MODE === 'none') return 'tap to type';
+  if (MODE === 'none'){
+    // Two very different causes, two different fixes. Saying "tap to type"
+    // for both leaves the fixable one looking like a broken app.
+    return (standaloneApp && !window.isSecureContext)
+      ? 'no mic in app mode over http · use the https address'
+      : 'no speech in this browser · tap to type';
+  }
   return speakOn ? 'tap to speak' : 'tap to speak · text only';
 }
 
@@ -1734,7 +1740,7 @@ function timerFire(t){
   poke();                                        // wake the screen
   sfx('alarm');
   const msg = t.label ? ('Timer: ' + t.label) : 'Timer finished.';
-  bubble('bot', '⏰ ' + msg);
+  bubble('bot', msg);
   speak(msg);
 }
 function timerArm(t){
@@ -2505,7 +2511,7 @@ function memAutoCapture(text){
     const m = text.match(re);
     if (m){
       const saved = memAdd(build(m));
-      if (saved) trace('\u{1F9E0} ' + saved);
+      if (saved) trace('remembered: ' + saved);
       residue = residue.replace(m[0], ' ');
     }
   }
@@ -3045,11 +3051,11 @@ async function doResearch(text, topic, useWeb){
     el.textContent = stripMarkdown(full);
 
     if (filed && filed.file){
-      trace('\u{1F4DD} filed as ' + filed.title);
+      trace('filed as ' + filed.title);
       if (filed.sources && filed.sources.length)
-        trace('\u{1F4DA} ' + filed.sources.join(' · '));
+        trace('sources: ' + filed.sources.join(' · '));
     } else {
-      trace('⚠️ answered, but the note could not be written');
+      trace('answered, but the note could not be written');
     }
 
     // Kept in history so the conversation can continue from it, exactly as it
@@ -3129,13 +3135,13 @@ async function send(text){
   // an encyclopedia article, and using only one source keeps the prompt tight
   // and avoids handing the model two accounts that may disagree.
   const note = await memNote(askText);
-  if (note) trace('\u{1F5D2}️ ' + note.title);
+  if (note) trace('note: ' + note.title);
 
   let ref = null;
   if (!note && wikiOn && wikiUp){
     setState('thinking', 'looking it up');
     ref = await wikiLookup(askText);
-    if (ref) trace('\u{1F4D6} ' + ref.title);
+    if (ref) trace('archive: ' + ref.title);
   }
 
   const el = bubble('bot', '');
@@ -3312,8 +3318,27 @@ const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMed
 const standaloneApp = window.navigator.standalone === true
   || window.matchMedia('(display-mode: standalone)').matches;
 
-const MODE = standaloneApp ? (canRecord ? 'record' : 'none')
-           : (SR ? 'webspeech' : (canRecord ? 'record' : 'none'));
+// Attempted, not assumed. Speech recognition is tried wherever it exists —
+// including in the home-screen app, where it was previously ruled out on sight.
+// If it dies with the signature below, demoteMode() moves to recording.
+let MODE = SR ? 'webspeech' : (canRecord ? 'record' : 'none');
+
+// Recording is the fallback, and it needs a secure context. Naming that here
+// keeps the reason next to the decision instead of three hundred lines away.
+function demoteMode(why){
+  const next = canRecord ? 'record' : 'none';
+  if (MODE === next) return;
+  MODE = next;
+  try {
+    navigator.sendBeacon('/diag', new Blob([JSON.stringify({
+      event: 'demote', from: 'webspeech', to: next, why: why,
+      standalone: standaloneApp, secure: window.isSecureContext,
+    })], { type: 'application/json' }));
+  } catch {}
+  setState('idle', next === 'record'
+    ? 'switched to recording \u00b7 tap to speak'
+    : 'no mic in app mode over http \u00b7 use the https address');
+}
 
 let recog = null;
 if (MODE === 'webspeech'){
@@ -3323,8 +3348,12 @@ if (MODE === 'webspeech'){
   recog.continuous = false;
 
   let finalText = '';
+  // The last unfinalised text. Kept because the idle timer can stop recognition
+  // in the gap between Safari emitting an interim result and marking it final,
+  // and without this that sentence is simply lost.
+  let interimText = '';
   recog.onstart = () => {
-    listening = true; finalText = '';
+    listening = true; finalText = ''; interimText = '';
     setState('listening', 'listening');
   };
   recog.onresult = (e) => {
@@ -3333,6 +3362,7 @@ if (MODE === 'webspeech'){
       const r = e.results[i];
       if (r.isFinal) finalText += r[0].transcript; else interim += r[0].transcript;
     }
+    interimText = interim;
     pulse(.85);
     statusEl.textContent = (finalText + interim).slice(-52) || 'listening';
   };
@@ -3416,17 +3446,23 @@ if (MODE === 'webspeech'){
     disarmIdle();
     listening = false;
     if (finalText.trim()){ sfx('stop'); send(finalText); return; }
+    // Nothing was finalised, but something was heard. Use it rather than
+    // discarding the turn — an imperfect transcript is recoverable, a lost one
+    // is not, and the user already watched these words appear.
+    if (interimText.trim().length > 1){ sfx('stop'); send(interimText.trim()); return; }
     if (busy) return;
 
     const ranFor = Date.now() - startedAtMs;
     diag('end', { ms: startedAtMs ? ranFor : null, error: sawError ? 'see-earlier' :
                   (sawAnyResult ? 'had-result' : 'silent') });
     if (!sawAnyResult && !sawError && ranFor < 900){
-      // Died on arrival. Report the cause rather than "tap to speak" again,
-      // which just invites the user to repeat a thing that cannot work.
-      setState('idle', standalone
-        ? 'speech needs Safari, not the home-screen app'
-        : 'speech unavailable here');
+      // Died on arrival: constructed, started and ended in under a second with
+      // nothing to show. Previously this only printed a message and left the
+      // user tapping a button that could never work. Now it switches paths.
+      demoteMode('ended in ' + ranFor + 'ms with no result');
+      if (MODE === 'record'){
+        startRecording();          // carry on with the tap they already made
+      }
       return;
     }
     setState('idle', idleHint());
@@ -3775,7 +3811,7 @@ if (MODE === 'record' && !window.isSecureContext){
 // Standalone + plain http is the one combination with no voice route at all:
 // speech recognition is broken by iOS here, and getUserMedia needs a secure
 // context. Say so, rather than offering a mic that cannot work.
-if (standaloneApp && MODE === 'none'){
+if (standaloneApp && MODE === 'none' && !window.isSecureContext){
   statusEl.textContent = 'voice needs the https address in app mode';
 }
 
@@ -3789,6 +3825,25 @@ setInterval(() => {
 }, 1000);
 
 /* ============ init ============ */
+
+/* Report which speech path this device landed on, once, at load.
+   The existing beacon lives inside the webspeech branch, so the state that
+   most needs explaining -- no speech at all -- was the one state that reported
+   nothing. Lifecycle and capability flags only, never transcript text. */
+(function reportMode(){
+  try {
+    navigator.sendBeacon('/diag', new Blob([JSON.stringify({
+      event: 'load',
+      mode: MODE,
+      standalone: standaloneApp,
+      secure: window.isSecureContext,
+      hasSR: !!SR,
+      canRecord: canRecord,
+      ua: navigator.userAgent.slice(0, 120),
+    })], { type: 'application/json' }));
+  } catch {}
+})();
+
 restoreHistory();
 avatarInit();                       // swaps the orb for a character, if one exists
 memLoad();                          // durable facts about the user
