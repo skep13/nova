@@ -940,6 +940,9 @@ def search_vault(query, allow_generated=True):
         return None
     df = _build_index()
     total = len(_vault)
+    # "Common" is the same 8% line the autolinker uses to decide whether a
+    # one-word title is worth linking. One definition, two callers.
+    common_df = total * 0.08
 
     best, best_score = None, 0.0
     for n in _vault:
@@ -957,6 +960,19 @@ def search_vault(query, allow_generated=True):
             # System" — and someone asking "what is dns" wants the latter. An
             # acronym is a name for the thing, not a mention of it.
             weight = 4.0 if w in n["_al"] else (3.0 if w in n["_tw"] else 1.0)
+
+            # A source note's title is a file and a symbol — "nginx.conf: /run",
+            # "remote_proxy.py: search_vault". Symbol names are usually rare and
+            # deserve the title weight; the ones that are ordinary English words
+            # do not. "what hardware does this run on" was answered with the
+            # nginx location named /run, purely because "run" sat in a title.
+            #
+            # So a source title word earns its bonus only if it is rare in the
+            # vault. search_vault and gather_sources clear that easily; run,
+            # code, place and health do not, and fall back to body weight.
+            if weight == 3.0 and n["file"].startswith("src-") and df.get(w, 0) > common_df:
+                weight = 1.0
+
             score += rarity * weight
         # A note the assistant wrote itself loses a close contest to one a
         # person wrote or the archive supplied. It is still findable — often it

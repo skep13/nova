@@ -228,6 +228,21 @@ RULES = {
         ("source-tools", "The watcher, the sandbox and the backup.",
          ["nova-maintain", "sandbox_server", "orb-backup"]),
     ],
+    "web": [
+        ("python-tooling", "The current Python stack, as it actually is rather than as the archive remembers.",
+         ["uv ", "uv(", "ruff", "polars", "duckdb", "fastapi", "pydantic", "httpx",
+          "textual", "rich", "typer", "pytest", "sqlalchemy"]),
+        ("ai-runtimes", "Running models locally, and the formats they come in.",
+         ["llama.cpp", "ollama", "vllm", "gguf", "pytorch", "transformers",
+          "model context protocol"]),
+        ("javascript-and-web", "The browser side, which moves fastest of all.",
+         ["vite", "bun", "deno", "htmx", "tailwind", "typescript"]),
+        ("infrastructure-tools", "Serving, proxying, deploying and watching.",
+         ["podman", "caddy", "traefik", "prometheus", "grafana", "ansible",
+          "opentofu", "terraform"]),
+        ("data-formats-and-stores", "Where the data actually sits.",
+         ["parquet", "arrow", "sqlite", "postgres"]),
+    ],
     "home": [
         ("storage-and-data", "Disks, filesystems and the copies that survive them.",
          ["raid", "zfs", "btrfs", "network-attached", "solid-state", "hard disk",
@@ -352,6 +367,7 @@ FALLBACK = {
     "nature": ("nature-general", "The living world, uncategorised."),
     "skills": ("skills-general", "Practical skills that span the other groupings."),
     "nova": ("nova-general", "Nova itself, uncategorised."),
+    "web": ("web-general", "Live-sourced notes that did not fit a narrower topic."),
     "code": ("programming-general", "Programming ground that did not fit a narrower topic."),
     "ops": ("operations-general", "Running and maintaining systems, uncategorised."),
     "home": ("homelab-general", "Self-hosting ground that did not fit a narrower topic."),
@@ -384,6 +400,7 @@ DOMAINS = [
     ("culture", "Culture", "Music, film, art, writing, belief and games."),
     ("nature", "The Natural World", "Animals, plants, weather and the systems they sit in."),
     ("skills", "Skills", "Things worth being able to do."),
+    ("web", "Current Tooling", "Fetched from the live web, because the offline archive is a snapshot and cannot know any of it."),
     ("code", "Programming", "Languages, testing, debugging and the craft of writing software."),
     ("ops", "Operations", "Running systems: deployment, reliability, monitoring and recovery."),
 ]
@@ -463,7 +480,7 @@ def main():
         domain = next((d for d in ("security", "ai", "cs", "field", "home", "make",
                                    "life", "health", "mind", "world", "sci",
                                    "code", "ops", "wellbeing",
-                                   "culture", "nature", "skills", "nova")
+                                   "culture", "nature", "skills", "nova", "web")
                        if d in tags), None)
         # Nova used to be diverted into a flat list here, which was right when
         # it held six notes and wrong now it holds 134 — most of them source
