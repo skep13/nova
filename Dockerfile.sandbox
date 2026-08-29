@@ -1,0 +1,17 @@
+# Runs model-written Python and nothing else.
+#
+# Deliberately plain: no compiler, no package manager at runtime, no extra
+# libraries. Every dependency is one more thing a generated snippet could reach
+# for, and the point of this container is that there is nothing here to reach.
+FROM python:3.11-slim
+
+# An unprivileged user. The container is also read_only with a tmpfs /tmp, so
+# this is the second of several independent limits rather than the only one.
+RUN useradd --create-home --shell /usr/sbin/nologin sandbox
+
+COPY sandbox_server.py /usr/local/bin/sandbox_server.py
+
+USER sandbox
+WORKDIR /home/sandbox
+EXPOSE 5005
+CMD ["python3", "/usr/local/bin/sandbox_server.py"]

@@ -3489,7 +3489,18 @@ if (MODE === 'webspeech'){
     origOnStart(e);
   };
   const origOnResult = recog.onresult;
-  recog.onresult = (e) => { sawAnyResult = true; armIdle(SPEECH_IDLE_MS); origOnResult(e); };
+  recog.onresult = (e) => {
+    sawAnyResult = true;
+    // Only shorten the timer once something was actually SAID. Safari fires
+    // result events with empty transcripts almost as soon as recognition
+    // starts, and arming the 1.5s quiet timer on one of those ended the turn a
+    // second and a half after the tap — before a word had been spoken, which
+    // looks exactly like the microphone refusing to listen.
+    let heard = '';
+    for (let i = 0; i < e.results.length; i++) heard += e.results[i][0].transcript;
+    armIdle(heard.trim() ? SPEECH_IDLE_MS : NO_SPEECH_MS);
+    origOnResult(e);
+  };
   const origOnError = recog.onerror;
   recog.onerror = (e) => {
     disarmIdle();

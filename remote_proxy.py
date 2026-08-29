@@ -1945,6 +1945,148 @@ async def maintain_list(request):
                               "services": list(MAINT_SERVICES)})
 
 
+# --- code: written, run, and fixed against the error -------------------------
+SANDBOX_URL = os.environ.get("SANDBOX_URL", "http://sandbox:5005")
+CODE_ATTEMPTS = int(os.environ.get("CODE_ATTEMPTS", "3"))
+CODE_MAX_TOKENS = int(os.environ.get("CODE_MAX_TOKENS", "700"))
+
+CODE_SYSTEM = (
+    "You write small, self-contained Python programs. Output ONLY code, with no "
+    "explanation, no markdown fences and no commentary. The program must run on "
+    "its own with no arguments and no network access, and must print its result. "
+    "The standard library only: nothing can be installed.\n\n"
+    # The loop can only catch what crashes. Asked for the mean of 91, 84 and 77
+    # it produced a program that ran cleanly and printed 0.0 -- correct exit
+    # code, wrong answer, and nothing in the system able to tell. Asserting a
+    # property the answer must have converts a wrong result into a traceback,
+    # which is the one kind of failure this loop is good at fixing.
+    "Where the expected result or a property of it is knowable in advance, end "
+    "with a short assert that checks it, so a wrong answer fails loudly instead "
+    "of printing quietly. Do not assert anything you are guessing at."
+)
+
+
+def strip_fences(text):
+    """Models emit fences however often they are told not to."""
+    m = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.S)
+    if m:
+        return m.group(1).strip()
+    return text.strip()
+
+
+async def sandbox_run(session, code):
+    try:
+        async with session.post(SANDBOX_URL + "/exec", json={"code": code}) as r:
+            return await r.json()
+    except Exception as exc:
+        return {"ok": False, "stdout": "", "exit": None, "timed_out": False,
+                "stderr": f"sandbox unreachable: {type(exc).__name__}"}
+
+
+async def complete(session, agent, messages, max_tokens):
+    """One non-streaming completion, from the chosen backend or local."""
+    if agent["name"] != "local":
+        body = remote_payload(agent, {"messages": messages, "stream": False})
+        body["max_tokens"] = max_tokens
+        headers = {"Authorization": f"Bearer {read_key(agent['name'])}",
+                   "Content-Type": "application/json"}
+        try:
+            async with session.post(agent["url"], json=body, headers=headers) as r:
+                if r.status != 200:
+                    raise RuntimeError(f"{r.status}: {(await r.text())[:200]}")
+                out = await r.json()
+            note_success(agent["name"])
+            return out["choices"][0]["message"]["content"], agent["name"]
+        except Exception as exc:
+            note_failure(agent["name"], str(exc))
+            # fall through to local, same as everywhere else here
+
+    async with session.post(LOCAL_URL, json={"messages": messages, "stream": False,
+                                             "max_tokens": max_tokens}) as r:
+        out = await r.json()
+    return out["choices"][0]["message"]["content"], "local"
+
+
+async def code(request):
+    payload = await request.json()
+    task = (payload.get("q") or "").strip()
+    if not task:
+        return web.json_response({"error": "no task given"}, status=400)
+
+    want = payload.get("agent", "local") or "local"
+    agent = BY_NAME.get(want, BY_NAME["local"])
+    if not available(agent):
+        agent = BY_NAME["local"]
+
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-cache",
+                                       "X-Accel-Buffering": "no"})
+    await resp.prepare(request)
+
+    async def event(obj):
+        await resp.write(("data: " + json.dumps(obj) + "\n\n").encode())
+
+    messages = [{"role": "system", "content": CODE_SYSTEM},
+                {"role": "user", "content": task}]
+    timeout = aiohttp.ClientTimeout(total=900, sock_read=900)
+    final_code, final_run, used = "", None, agent["name"]
+
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        for attempt in range(1, CODE_ATTEMPTS + 1):
+            await event({"stage": "writing", "attempt": attempt,
+                         "of": CODE_ATTEMPTS})
+            try:
+                text, used = await complete(s, agent, messages, CODE_MAX_TOKENS)
+            except Exception as exc:
+                await event({"stage": "error",
+                             "message": f"model failed: {str(exc)[:200]}"})
+                break
+
+            final_code = strip_fences(text)
+            await event({"stage": "code", "attempt": attempt, "code": final_code})
+
+            await event({"stage": "running", "attempt": attempt})
+            run = await sandbox_run(s, final_code)
+            final_run = run
+            await event({"stage": "ran", "attempt": attempt, "ok": run.get("ok"),
+                         "stdout": (run.get("stdout") or "")[:2000],
+                         "stderr": (run.get("stderr") or "")[:2000]})
+
+            if run.get("ok"):
+                break
+            if attempt == CODE_ATTEMPTS:
+                break
+
+            # The error goes back verbatim. Summarising it would remove the line
+            # number, which is the only part that reliably helps.
+            messages = messages[:2] + [
+                {"role": "assistant", "content": final_code},
+                {"role": "user", "content":
+                    "That failed when run. Fix it and output only the corrected "
+                    "program.\n\nstderr:\n" + (run.get("stderr") or "")[:1500]},
+            ]
+
+    ok = bool(final_run and final_run.get("ok"))
+    log_exchange(task, final_code, f"code/{used}", None)
+    await event({"stage": "done", "ok": ok, "agent": used,
+                 "attempts": attempt if final_run else 0,
+                 "code": final_code,
+                 "stdout": (final_run or {}).get("stdout", "")[:2000]})
+    await resp.write(b"data: [DONE]\n\n")
+    return resp
+
+
+async def run_code(request):
+    """Execute a snippet directly, without a model in the loop."""
+    payload = await request.json()
+    snippet = payload.get("code") or ""
+    if not snippet.strip():
+        return web.json_response({"error": "no code"}, status=400)
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        return web.json_response(await sandbox_run(s, snippet))
+
+
 app.add_routes([
     web.post("/v1/chat/completions", chat),
     web.get("/agents", agents),
@@ -1956,6 +2098,8 @@ app.add_routes([
     web.get("/health", health),
     web.post("/maintain", maintain),
     web.get("/maintain", maintain_list),
+    web.post("/code", code),
+    web.post("/run", run_code),
 ])
 
 async def _on_startup(app):

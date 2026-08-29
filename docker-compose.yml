@@ -129,6 +129,53 @@ services:
           # rather than about which one was given more room.
           memory: 3400m
 
+  # Runs code the model wrote, so its mistakes are caught by a traceback rather
+  # than by the user. Verification is the single largest improvement available
+  # to code help on this box: a smaller model that can run its own output and
+  # read the error beats a larger one answering blind.
+  #
+  # The isolation is here, not in the Python. Every limit below is independent,
+  # because the thing being executed is written by a 3B and must be assumed
+  # wrong in ways nobody predicted:
+  #
+  #   sandbox_net is internal   - no route off the bridge. Nothing it runs can
+  #                               reach the internet, the vault, the keys, the
+  #                               LAN, or any other container except the router.
+  #   read_only                 - the root filesystem is immutable
+  #   tmpfs /tmp                - the only writable space, capped, gone on exit
+  #   no volumes                - the vault and the API keys are not mounted
+  #   cap_drop ALL              - no capabilities at all
+  #   no-new-privileges         - setuid binaries cannot escalate
+  #   pids_limit                - a fork bomb hits a wall
+  #
+  # This is not a defence against a determined attacker who already has code
+  # execution. It is a defence against an infinite loop, a filled disk, or an
+  # import that phones home, which is what actually happens.
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: nova-sandbox:latest
+    container_name: orb-sandbox
+    restart: unless-stopped
+    networks:
+      - sandbox_net
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          # A fork bomb is the most likely thing a confused model writes by
+          # accident. Declared here rather than as pids_limit, which compose
+          # refuses to accept alongside a deploy.resources block.
+          pids: 96
+
   # Web search. The offline Wikipedia is a snapshot and cannot know anything
   # that happened after it was made — asked about a model released last month it
   # is not wrong, it is silent. This is the path for everything the archive
@@ -190,6 +237,9 @@ services:
   # providers retire and rename models regularly, and that should be a restart,
   # not a rebuild. A wrong ID surfaces on /agents as last_error.
   remote:
+    networks:
+      - default
+      - sandbox_net
     build:
       context: .
       dockerfile: Dockerfile.remote
@@ -393,6 +443,13 @@ services:
           # was a transcriber that heard "grid reference" as "great reference",
           # which silently disables the position command that matches on it.
           memory: 500m
+
+networks:
+  default:
+  # internal: true means no gateway to the outside is attached, so a container
+  # on this network alone cannot reach anything off the host at all.
+  sandbox_net:
+    internal: true
 
 volumes:
   models:
