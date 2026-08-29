@@ -53,14 +53,17 @@ graph = {
     "nodeSizeMultiplier": 1.15,
     "lineSizeMultiplier": 0.7,
 
-    # Tuned for 338 nodes rather than the handful the defaults assume: weak
-    # centring and strong repulsion let the five domains separate into visible
-    # lobes instead of collapsing into one ball.
+    # Near the extremes, not merely off the defaults. At 338 nodes and ~2250
+    # links the defaults collapse the graph into a single ball regardless of
+    # how well structured the links are — the hub layer is present in the data
+    # and simply cannot be seen. A first pass at 0.28/16/0.55/220 was still a
+    # ball on the device; centre strength is the term doing the damage, so it
+    # goes to the floor and repulsion to the ceiling.
     "collapse-forces": False,
-    "centerStrength": 0.28,
-    "repelStrength": 16,
-    "linkStrength": 0.55,
-    "linkDistance": 220,
+    "centerStrength": 0.1,
+    "repelStrength": 20,
+    "linkStrength": 0.3,
+    "linkDistance": 400,
 
     "scale": 0.62,
     "close": False,
