@@ -645,14 +645,24 @@ def docx_text(blob):
     import zipfile, io as _io, html as _html
     with zipfile.ZipFile(_io.BytesIO(blob)) as z:
         xml = z.read("word/document.xml").decode("utf-8", "replace")
-    # Structure first: without this every paragraph runs into the next one and
-    # the note arrives as a single unreadable wall.
-    xml = re.sub(r"</w:p>", "\n\n", xml)
-    xml = re.sub(r"<w:br[^>]*/>", "\n", xml)
-    xml = re.sub(r"<w:tab[^>]*/>", "    ", xml)
-    parts = re.findall(r"<w:t[^>]*>(.*?)</w:t>", xml, re.S)
-    text = "".join(parts) if parts else re.sub(r"<[^>]+>", "", xml)
-    text = _html.unescape(text)
+
+    # Paragraph by paragraph, NOT a global substitution followed by a sweep of
+    # <w:t> runs. The first version inserted breaks into the XML and then
+    # extracted only the runs, which threw those breaks straight back away and
+    # produced one unbroken wall: "...Orb deploymentThe device is reachable...".
+    out = []
+    for para in re.split(r"</w:p>", xml):
+        para = re.sub(r"<w:br[^>]*/>", "\n", para)
+        para = re.sub(r"<w:tab[^>]*/>", "    ", para)
+        runs = re.findall(r"<w:t[^>]*>(.*?)</w:t>", para, re.S)
+        if runs:
+            text = _html.unescape("".join(runs)).strip()
+            if text:
+                out.append(text)
+    text = "\n\n".join(out)
+    if not text:                        # not a shape we recognise: take it all
+        text = _html.unescape(re.sub(r"<[^>]+>", " ", xml))
+        text = re.sub(r"[ \t]+", " ", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -716,7 +726,16 @@ async def ingest(request):
         return web.json_response({"error": "that file had no readable text in it"}, status=422)
 
     stem = pathlib.Path(name).stem
-    title = title or re.sub(r"[-_]+", " ", stem).strip() or "Uploaded note"
+    if not title:
+        # The document usually names itself in its first line, and that beats a
+        # filename: "threat-model.docx" gives "threat model", the document
+        # gives "Threat model for the Orb deployment".
+        first = text.strip().split("\n", 1)[0].strip()
+        if 3 < len(first) <= 80 and "\n" in text.strip():
+            title = first
+        else:
+            title = re.sub(r"[-_]+", " ", stem).strip() or "Uploaded note"
+        title = title[:1].upper() + title[1:]
     now = datetime.datetime.now()
     fname = f"{slug(stem, 60)}-{now.strftime('%H%M%S')}.md"
     doc = ("---\n"

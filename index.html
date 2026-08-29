@@ -299,7 +299,7 @@ body.listening .status{
    A keyboard covers most of a landscape phone, so the input is not worth
    permanent screen space on a device driven by voice. */
 .composer{
-  display:none;
+  display:none;align-items:center;gap:8px;
   flex:0 0 auto;
   padding:7px 12px;
   border-top:1px solid var(--edge);
@@ -307,7 +307,19 @@ body.listening .status{
   backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
 }
 .composer.show{display:flex}
-.composer input{
+.upload{
+  flex:0 0 auto;width:36px;height:36px;border-radius:10px;
+  border:1px solid var(--edge);background:rgba(150,200,255,.07);
+  color:#cfe4ff;display:grid;place-items:center;
+  cursor:pointer;touch-action:manipulation;
+  box-shadow:0 1px 0 rgba(255,255,255,.05) inset;
+  transition:background .15s,border-color .15s;
+}
+.upload:active{background:rgba(92,200,255,.2)}
+.upload svg{width:17px;height:17px;fill:currentColor}
+.upload.busy{color:var(--cyan);border-color:var(--edge-lit)}
+
+.composer input[type=text],.composer input:not([type]){
   flex:1;min-width:0;
   background:rgba(255,255,255,.06);
   border:1px solid var(--edge);border-radius:19px;
@@ -413,6 +425,12 @@ html.dimmed .dim{opacity:.92;pointer-events:auto}
   <div class="mid">
     <div class="log" id="log"></div>
     <div class="composer" id="composer">
+      <!-- Lives with the keyboard rather than on the rail: uploading is a
+           deliberate, two-handed act, not something to do mid-stride. -->
+      <button class="upload" id="upBtn" aria-label="Add a document to the vault">
+        <svg viewBox="0 0 24 24"><path d="M12 3l5 5h-3v6h-4V8H7l5-5zM5 18h14v2H5v-2z"/></svg>
+      </button>
+      <input type="file" id="upFile" accept=".docx,.md,.markdown,.txt,.text,.csv,.json,.log,.htm,.html" hidden>
       <input id="input" placeholder="Message" autocomplete="off" autocapitalize="sentences" enterkeyhint="send">
     </div>
   </div>
@@ -2963,6 +2981,36 @@ agentBtn.addEventListener('click', () => {
 
 agentChip.addEventListener('click', (e) => { e.stopPropagation(); agentBtn.click(); });
 geoChip.addEventListener('click', (e) => { e.stopPropagation(); refreshGeo(); });
+
+/* Document upload. The file is converted to a note SERVER-side and lands in
+   the same vault Obsidian syncs, so an upload from the phone is on the laptop
+   too. Deliberately reports what it made rather than succeeding silently: the
+   vault is only trustworthy if you can see what went into it. */
+upBtn.addEventListener('click', () => { poke(); upFile.click(); });
+
+upFile.addEventListener('change', async () => {
+  const f = upFile.files && upFile.files[0];
+  if (!f) return;
+  upFile.value = '';                       // so the same file can be re-picked
+  upBtn.classList.add('busy');
+  setState('thinking', 'reading ' + f.name);
+  const fd = new FormData();
+  fd.append('file', f, f.name);
+  let msg;
+  try {
+    const r = await fetch('/ingest', { method:'POST', body: fd });
+    const j = await r.json().catch(() => null);
+    msg = (j && j.ok)
+      ? 'Added "' + j.title + '" to the vault, ' + j.characters + ' characters. Ask me about it.'
+      : (j && j.error) ? j.error : 'That upload failed.';
+  } catch {
+    msg = 'Could not reach the vault to save that.';
+  }
+  upBtn.classList.remove('busy');
+  bubble('bot', msg); speak(msg);
+  setState('idle', idleHint());
+  memLoad();                               // a short upload may be a new fact
+});
 
 kbBtn.addEventListener('click', () => {
   unlockTTS(); poke();
