@@ -118,38 +118,120 @@ body{
 .mid::after{right:0}
 .mid{position:relative}
 
-/* ---------- orb ---------- */
+/* ---------- orb ----------
+   Concentric luminous rings, as originally designed. Restored after a glass
+   sphere experiment that was more physically literal and much less this
+   device: the rings read instantly at arm's length, which a subtly shaded
+   sphere does not.
+
+   Two rules govern every animation below.
+
+   ONE: only transform and opacity are animated. The previous thinking state
+   animated filter:blur() between 11px and 15px, and blur radius cannot be
+   composited — each frame re-rasterises the layer and recomputes the whole
+   blur. On two cores that is the stutter. It is now a cross-fade between two
+   layers each blurred ONCE at a fixed radius, which looks the same and costs
+   the compositor almost nothing.
+
+   TWO: the amplitude scale and the keyframe animations live on different
+   elements. Both used to write transform on .orb-wrap, so an animation
+   silently overwrote the voice response — hidden only because idle amplitude
+   sits near zero. .orb-wrap is now the microphone's, .orb-inner the
+   animations'.
+   ---------------------------------------------------------- */
 .orb-wrap{
   position:relative;
   width:var(--orb);height:var(--orb);
-  transform:scale(calc(1 + var(--amp,0) * .05));
-  transition:transform .1s ease-out;
+  /* Owned by the mic. Slight overshoot on the way in so a syllable lands with
+     some snap instead of easing politely into place. */
+  transform:scale(calc(1 + var(--amp,0) * .055));
+  transition:transform .13s cubic-bezier(.34,1.4,.5,1);
+  will-change:transform;
 }
+.orb-inner{position:absolute;inset:0;will-change:transform}
+
 .halo{
   position:absolute;inset:-26%;border-radius:50%;
   background:radial-gradient(circle,
-    rgba(79,195,255,calc(.20 + var(--amp,0)*.32)) 0%,
-    rgba(40,110,220,.13) 42%, transparent 72%);
-  filter:blur(14px);
+    rgba(120,215,255,calc(.22 + var(--amp,0)*.34)) 0%,
+    rgba(64,150,240,.16) 34%,
+    rgba(30,86,190,.07) 56%,
+    transparent 74%);
+  filter:blur(16px);
+  pointer-events:none;
 }
+
+/* The rings. Pure #ffffff stops clipped and flattened the bands into glare —
+   pulled back a little so the falloff either side of each ring survives, which
+   is what gives them their glow. */
 .rings{
   position:absolute;inset:0;border-radius:50%;
   background:radial-gradient(circle at 50% 50%,
     #0a1830 0%,  #0a1830 24%,
-    #dff2ff 26.5%, #ffffff 30%, #c6e7ff 34.5%,
+    /* More stops through each band, and peaks pulled off white. The bloom
+       layer adds ~30% on top by screen blend, so stops that were nearly white
+       to begin with clipped — the two rings fused into one flat glare and the
+       falloff that makes them look luminous was gone. Peaking at #cfe9ff
+       leaves the bloom somewhere to go. */
+    #5ea6d8 25.5%, #93c9ee 28%, #aed9f5 30%, #8bc3e8 32.5%, #4a8cc0 35%,
     #0b1c3a 37.5%, #091830 46%,
-    #b6e2ff 49.5%, #ffffff 55%, #d2eeff 60.5%,
+    #66b0e4 48.5%, #a8d9f8 51.5%, #c6e6ff 55%, #9ed2f5 58.5%, #4f96cf 61.5%,
     #2159a4 64%, #17418a 70%,
     #123671 74%, #17458a 84%,
     #0c2450 90.5%, rgba(9,22,48,0) 100%);
 }
+
+/* Dimensionality. Concentric rings are inherently flat — every band sits at
+   the same apparent depth, which is why it reads as a target rather than an
+   object. One directional light across the whole disc, brightening the upper
+   left and shading the lower right, makes it a lens instead. */
+.lens{
+  position:absolute;inset:0;border-radius:50%;
+  background:
+    radial-gradient(ellipse 74% 62% at 30% 24%, rgba(224,244,255,.34) 0%, transparent 60%),
+    radial-gradient(ellipse 88% 78% at 72% 80%, rgba(1,7,20,.62) 0%, transparent 64%);
+  mix-blend-mode:soft-light;
+  pointer-events:none;
+}
+
+/* A dichroic shift around the disc. Coated optics never stay one colour across
+   their whole surface, and a few degrees of hue drift is the difference
+   between "cyan gradient" and "a piece of glass with a coating on it". Kept
+   under 10% opacity — meant to be felt, not seen. */
+.tint{
+  position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(from 210deg,
+    rgba(120,140,255,.09) 0deg,
+    rgba(90,220,255,.05) 90deg,
+    rgba(80,255,220,.07) 175deg,
+    rgba(150,190,255,.06) 260deg,
+    rgba(120,140,255,.09) 360deg);
+  mix-blend-mode:screen;
+  pointer-events:none;
+}
+
+/* Two bloom layers, each blurred once at a FIXED radius. Thinking cross-fades
+   between them; nothing re-blurs per frame. */
 .bloom{
   position:absolute;inset:0;border-radius:50%;
   background:inherit;
-  filter:blur(11px) saturate(1.25);
-  opacity:calc(.72 + var(--amp,0)*.28);
+  /* Wider and weaker than before. A tight, strong bloom just reprints the
+     rings a few pixels out and doubles their brightness; a wide, faint one
+     spreads light into the dark bands between them, which is what glow
+     actually looks like. */
+  filter:blur(15px) saturate(1.3);
+  opacity:calc(.42 + var(--amp,0)*.30);
   mix-blend-mode:screen;pointer-events:none;
 }
+.bloom.wide{
+  filter:blur(26px) saturate(1.6);
+  opacity:0;
+}
+
+/* Facets, now in two counter-rotating layers at different speeds. A single
+   spinning layer reads as one texture turning; two at different rates read as
+   depth, and the interference between them never repeats on any timescale
+   anyone will watch. */
 .facets{
   position:absolute;inset:0;border-radius:50%;
   background:repeating-conic-gradient(from 0deg,
@@ -158,34 +240,290 @@ body{
   -webkit-mask:radial-gradient(circle,transparent 63%,#000 69%,#000 91%,transparent 99%);
           mask:radial-gradient(circle,transparent 63%,#000 69%,#000 91%,transparent 99%);
   mix-blend-mode:overlay;
-  animation:spin 48s linear infinite;pointer-events:none;
+  animation:spin 64s linear infinite;
+  pointer-events:none;will-change:transform;
+}
+.facets.b{
+  background:repeating-conic-gradient(from 7deg,
+    rgba(160,205,255,.09) 0deg 7deg,
+    rgba(2,10,26,.18) 7deg 31deg);
+  -webkit-mask:radial-gradient(circle,transparent 66%,#000 72%,#000 88%,transparent 97%);
+          mask:radial-gradient(circle,transparent 66%,#000 72%,#000 88%,transparent 97%);
+  animation-duration:41s;animation-direction:reverse;
+  opacity:.7;
+}
+
+/* A highlight travelling around the outer band. Slow enough to be noticed
+   rather than watched — the thing that stops a static ring looking painted. */
+.sheen{
+  position:absolute;inset:0;border-radius:50%;
+  /* Narrower and brighter than the first attempt, which spread .3 alpha over
+     96 degrees and simply disappeared into the rings it was meant to travel
+     across. A highlight has to be tighter than what it moves over to read as
+     moving at all. */
+  background:conic-gradient(from 0deg,
+    transparent 0deg,
+    rgba(200,238,255,.22) 12deg,
+    rgba(245,253,255,.85) 26deg,
+    rgba(200,238,255,.20) 40deg,
+    transparent 54deg);
+  -webkit-mask:radial-gradient(circle,transparent 62%,#000 68%,#000 92%,transparent 99%);
+          mask:radial-gradient(circle,transparent 62%,#000 68%,#000 92%,transparent 99%);
+  mix-blend-mode:screen;opacity:.55;
+  animation:spin 17s linear infinite;
+  pointer-events:none;will-change:transform;
+}
+
+/* The pip now travels the dark band between the two rings instead of sitting
+   in one spot. Static, it read as a stray highlight someone forgot to remove;
+   moving slowly along the gap it reads as an indicator, which is what an
+   instrument this shape ought to have. The orbit carries it, so its own
+   transform stays free for the speaking pulse. */
+.pip-orbit{
+  position:absolute;inset:0;
+  animation:spin 34s linear infinite;
+  pointer-events:none;will-change:transform;
 }
 .pip{
-  position:absolute;left:56%;top:60%;width:13%;height:13%;
+  position:absolute;left:50%;top:20.5%;width:8%;height:8%;
   border-radius:50%;
-  background:radial-gradient(circle at 38% 34%,#fff,#d7efff 55%,#8fd0ff 100%);
-  box-shadow:0 0 12px rgba(180,230,255,.9),0 0 30px rgba(79,195,255,.55);
+  background:radial-gradient(circle at 38% 34%,#fff,#dff3ff 48%,#8fd0ff 100%);
+  box-shadow:0 0 10px rgba(190,235,255,.95),0 0 26px rgba(79,195,255,.6),
+             0 0 52px rgba(60,160,255,.3);
   transform:translate(-50%,-50%);pointer-events:none;
+  will-change:transform;
 }
+
 .ripple{
   position:absolute;inset:0;border-radius:50%;
   border:1px solid rgba(150,215,255,.5);
-  opacity:0;pointer-events:none;
+  opacity:0;pointer-events:none;will-change:transform,opacity;
 }
-body.listening .ripple{animation:ripple 2.4s cubic-bezier(.2,.7,.3,1) infinite}
-body.listening .ripple:nth-of-type(2){animation-delay:.8s}
-body.listening .ripple:nth-of-type(3){animation-delay:1.6s}
 
-@keyframes ripple{0%{transform:scale(1);opacity:.6}100%{transform:scale(1.75);opacity:0}}
-@keyframes spin{to{transform:rotate(360deg)}}
-@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.022)}}
-@keyframes think{
-  0%,100%{filter:blur(11px) saturate(1.25) hue-rotate(0deg)}
-  50%{filter:blur(15px) saturate(1.6) hue-rotate(-14deg)}
+/* ---- motion ----
+   Curves matter more than durations here. The old ripple ran on
+   cubic-bezier(.2,.7,.3,1) from a standing start and faded linearly, so it
+   read as a circle being scaled. This leaves quickly, decelerates hard, and
+   fades on its own curve — which reads as something travelling outward. */
+@keyframes ripple{
+  0%{transform:scale(1);opacity:0}
+  8%{opacity:.62}
+  100%{transform:scale(1.82);opacity:0}
 }
-body.idle .orb-wrap{animation:breathe 6.5s ease-in-out infinite}
-body.thinking .facets{animation-duration:7s}
-body.thinking .bloom{animation:think 1.8s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Not a symmetrical sine. Real breathing pauses at the bottom and moves
+   through the top, so the curve holds low and passes quickly through the
+   peak. */
+@keyframes breathe{
+  0%,100%{transform:scale(1)}
+  44%{transform:scale(1.024)}
+  62%{transform:scale(1.019)}
+}
+/* Cross-fade, not a blur animation. */
+@keyframes bloomSwell{
+  0%,100%{opacity:0}
+  50%{opacity:.85}
+}
+@keyframes pipPulse{
+  0%,100%{transform:translate(-50%,-50%) scale(1)}
+  50%{transform:translate(-50%,-50%) scale(1.22)}
+}
+
+body.idle .orb-inner{animation:breathe 8s cubic-bezier(.42,0,.4,1) infinite}
+
+body.listening .ripple{animation:ripple 2.6s cubic-bezier(.12,.72,.24,1) infinite}
+body.listening .ripple:nth-of-type(2){animation-delay:.87s}
+body.listening .ripple:nth-of-type(3){animation-delay:1.74s}
+body.listening .sheen{animation-duration:7s;opacity:.7}
+
+body.thinking .facets{animation-duration:26s}
+body.thinking .facets.b{animation-duration:17s}
+body.thinking .sheen{animation-duration:3.4s;opacity:.85}
+body.thinking .bloom.wide{animation:bloomSwell 2.6s ease-in-out infinite}
+
+/* Speaking had no styling at all: setState('speaking') is called but nothing
+   matched it, so the orb lost even its idle breath and sat dead still through
+   every reply — the one moment it is most obviously doing something. */
+body.speaking .pip{animation:pipPulse 1.1s ease-in-out infinite}
+body.speaking .ripple{animation:ripple 1.9s cubic-bezier(.12,.72,.24,1) infinite}
+body.speaking .ripple:nth-of-type(2){animation-delay:.63s}
+body.speaking .ripple:nth-of-type(3){animation-delay:1.26s}
+body.speaking .sheen{animation-duration:5s;opacity:.72}
+
+/* ---- additional motion layers ---- */
+
+/* Slow positional drift, one level in from the breathing so the two do not
+   fight over transform. Tiny — a few thousandths of the orb — but a thing
+   that holds perfectly still reads as a picture of an object rather than an
+   object. */
+.orb-float{position:absolute;inset:0;will-change:transform}
+
+/* The aperture. A slow dilation at the centre, which is the single most
+   alive-looking thing a ringed instrument can do — it is the movement an iris
+   makes, and the eye recognises it without being told. */
+.iris{
+  position:absolute;inset:0;border-radius:50%;
+  background:radial-gradient(circle at 50% 50%,
+    rgba(150,225,255,.30) 0%,
+    rgba(90,185,255,.16) 34%,
+    rgba(40,120,220,.05) 52%,
+    transparent 66%);
+  mix-blend-mode:screen;opacity:.55;
+  pointer-events:none;will-change:transform,opacity;
+}
+
+/* A rare glint. Idle for nine tenths of its cycle, then a brief lift — the
+   point is that it is infrequent enough to catch you unawares rather than
+   becoming part of the background rhythm. */
+.flare{
+  position:absolute;inset:0;border-radius:50%;
+  background:radial-gradient(circle at 50% 50%,
+    rgba(226,246,255,.5) 0%, rgba(140,215,255,.22) 40%, transparent 68%);
+  filter:blur(18px);
+  mix-blend-mode:screen;opacity:0;
+  pointer-events:none;will-change:opacity;
+}
+
+/* One-shot on entering a state. CSS restarts an animation when the class that
+   selects it is applied, so this fires exactly once per transition and then
+   sits at zero — state changes used to snap with nothing to mark them. */
+.flash{
+  position:absolute;inset:-8%;border-radius:50%;
+  border:1px solid rgba(190,235,255,.75);
+  opacity:0;pointer-events:none;will-change:transform,opacity;
+}
+
+@keyframes floatDrift{
+  0%,100%{transform:translate(0,0)}
+  27%{transform:translate(.9%,-1.1%)}
+  53%{transform:translate(-.7%,.6%)}
+  78%{transform:translate(.4%,1%)}
+}
+@keyframes haloPulse{0%,100%{opacity:.82}50%{opacity:1}}
+@keyframes irisDilate{
+  0%,100%{transform:scale(1);opacity:.45}
+  50%{transform:scale(1.13);opacity:.8}
+}
+/* 92% of the cycle is dark, so this reads as an occasional glint rather than
+   a pulse with a long gap. */
+@keyframes flare{
+  0%,88%,100%{opacity:0}
+  93%{opacity:.55}
+  96%{opacity:.28}
+}
+@keyframes flash{
+  0%{opacity:.7;transform:scale(.94)}
+  100%{opacity:0;transform:scale(1.3)}
+}
+
+.orb-float{animation:floatDrift 19s ease-in-out infinite}
+.halo{animation:haloPulse 11s ease-in-out infinite}
+.iris{animation:irisDilate 13s ease-in-out infinite}
+.flare{animation:flare 34s linear infinite}
+.pip-orbit.b{animation-duration:53s;animation-direction:reverse}
+.pip.small{
+  width:4.6%;height:4.6%;top:31%;
+  box-shadow:0 0 7px rgba(170,225,255,.7),0 0 18px rgba(79,195,255,.35);
+  opacity:.7;
+}
+
+/* Each state entry announces itself once. */
+body.listening .flash,
+body.thinking  .flash,
+body.speaking  .flash{animation:flash .6s cubic-bezier(.18,.72,.28,1)}
+
+/* Listening: quicker breath at the edges, aperture opens up and stays wider. */
+body.listening .halo{animation-duration:4.6s}
+body.listening .iris{animation-duration:5.2s}
+body.listening .orb-float{animation-duration:11s}
+
+/* Thinking: the markers hunt round faster. This is the state where visible
+   work is the whole message. */
+body.thinking .pip-orbit{animation-duration:9s}
+body.thinking .pip-orbit.b{animation-duration:14s}
+body.thinking .iris{animation-duration:3.4s}
+body.thinking .halo{animation-duration:2.9s}
+
+/* Speaking: the aperture keeps time with the voice. */
+body.speaking .iris{animation-duration:2.1s}
+body.speaking .halo{animation-duration:3.4s}
+body.speaking .pip-orbit{animation-duration:20s}
+
+/* The amplitude response is feedback that the microphone is live, so it stays
+   even here. Everything else is decoration and goes. */
+@media (prefers-reduced-motion: reduce){
+  .facets,.facets.b,.sheen,.ripple,.bloom.wide,.pip,.pip-orbit,
+  .orb-inner,.orb-float,.halo,.iris,.flare,.flash{animation:none !important}
+  .iris{opacity:.55}
+  .orb-wrap{transition:none}
+}
+
+/* ---------- character avatar ----------
+   Optional. Hidden unless JS has confirmed an image actually loaded, so a
+   deployment with no artwork behaves exactly as it did before — a missing
+   file must never leave a broken frame where the assistant used to be.
+
+   When it is present the sphere is dropped but the ATMOSPHERE and the emitted
+   rings are kept, so the character stands in front of the same glow and the
+   listening and speaking states still read at a glance from across a room.
+   ---------------------------------------------------------- */
+.avatar{display:none}
+body.has-avatar .rings,
+body.has-avatar .facets,
+body.has-avatar .sheen,
+body.has-avatar .tint,
+body.has-avatar .lens,
+body.has-avatar .iris,
+body.has-avatar .flare,
+body.has-avatar .pip-orbit{display:none}
+
+body.has-avatar .avatar{
+  display:block;
+  position:absolute;inset:0;
+  background-position:center bottom;
+  background-repeat:no-repeat;
+  background-size:contain;
+  /* Feathered into the panel on every edge. A hard-cropped rectangle reads as
+     a photo pasted onto the UI; a fade reads as the character being lit by it.
+     Bottom is feathered least, so she stands on the panel rather than floating. */
+  -webkit-mask:radial-gradient(115% 92% at 50% 58%,#000 52%,rgba(0,0,0,.72) 76%,transparent 97%);
+          mask:radial-gradient(115% 92% at 50% 58%,#000 52%,rgba(0,0,0,.72) 76%,transparent 97%);
+  filter:drop-shadow(0 calc(var(--orb) * .02) calc(var(--orb) * .06) rgba(2,8,20,.7));
+  pointer-events:none;
+}
+/* The orb's glow becomes her key light, so it has to sit BEHIND her and read
+   as coming from the panel rather than from a ball in front of her face. */
+/* With artwork installed the rings are hidden but the HALO stays, so the
+   character is lit by the same glow the orb gave off rather than floating on
+   a flat panel. (The glass-sphere build called this .atmos; the ringed orb
+   calls it .halo, and this rule outlived that rename by one revision.) */
+body.has-avatar .halo{inset:-14%;filter:blur(calc(var(--orb) * .09))}
+body.has-avatar .orb-wrap{width:min(46vw,92vh,420px);height:min(46vw,92vh,420px)}
+
+/* Motion. Deliberately small: a character that lurches is uncanny, and this is
+   glanced at from a wrist, so the job is only to say "alive, and in this
+   state" — never to perform. */
+@keyframes avBreathe{
+  0%,100%{transform:translateY(0) scale(1)}
+  46%{transform:translateY(calc(var(--orb) * -.011)) scale(1.008)}
+}
+@keyframes avSway{
+  0%,100%{transform:translateX(calc(var(--orb) * -.006)) rotate(-.35deg)}
+  50%{transform:translateX(calc(var(--orb) * .006)) rotate(.35deg)}
+}
+@keyframes avSpeak{
+  0%,100%{transform:translateY(0) scale(1)}
+  50%{transform:translateY(calc(var(--orb) * -.006)) scale(1.011)}
+}
+body.idle.has-avatar      .avatar{animation:avBreathe 7.5s ease-in-out infinite}
+body.listening.has-avatar .avatar{animation:avBreathe 3.6s ease-in-out infinite}
+body.thinking.has-avatar  .avatar{animation:avSway 5.2s ease-in-out infinite}
+body.speaking.has-avatar  .avatar{animation:avSpeak 1.35s ease-in-out infinite}
+
+@media (prefers-reduced-motion: reduce){
+  .avatar{animation:none !important}
+}
 
 /* ---------- status ---------- */
 .status{
@@ -403,12 +741,33 @@ html.dimmed .dim{opacity:.92;pointer-events:auto}
 
 <div class="app">
   <div class="left" id="micZone" role="button" tabindex="0" aria-label="Tap to speak">
+    <!-- Layer order is the physical order, outside in: atmosphere, emitted
+         rings, the thinking sweep, then the body with its internals. The
+         specular is last because a highlight sits on top of everything. -->
     <div class="orb-wrap" id="orb">
-      <div class="halo"></div>
-      <div class="ripple"></div><div class="ripple"></div><div class="ripple"></div>
-      <div class="rings"><div class="bloom"></div></div>
-      <div class="facets"></div>
-      <div class="pip"></div>
+      <div class="orb-inner">
+       <div class="orb-float">
+        <div class="halo"></div>
+        <div class="ripple"></div><div class="ripple"></div><div class="ripple"></div>
+        <!-- Character avatar, if any artwork is installed; otherwise inert and
+             the orb below is what shows. See avatarInit(). -->
+        <div class="avatar" id="avatar"></div>
+        <div class="rings">
+          <div class="bloom"></div>
+          <div class="bloom wide"></div>
+        </div>
+        <div class="iris"></div>
+        <div class="facets"></div>
+        <div class="facets b"></div>
+        <div class="tint"></div>
+        <div class="sheen"></div>
+        <div class="flare"></div>
+        <div class="lens"></div>
+        <div class="pip-orbit"><div class="pip"></div></div>
+        <div class="pip-orbit b"><div class="pip small"></div></div>
+        <div class="flash"></div>
+       </div>
+      </div>
     </div>
     <div class="status" id="status">tap to speak</div>
 
@@ -592,8 +951,69 @@ document.addEventListener('visibilitychange', () => {
 });
 
 /* ============ orb state ============ */
+/* ---- character avatar ----
+   Entirely optional and entirely additive. If no image is found the page is
+   byte-for-byte the orb it was before, which is the only acceptable failure
+   mode for artwork on a device whose job is to work on a hillside.
+
+   Per-state images are a bonus on top of the required default, so one file is
+   enough to get started and four make it expressive. Each is confirmed to have
+   decoded before it is used — a 404 from nginx returns an HTML error page, and
+   setting that as a background-image silently yields an empty box rather than
+   an error anyone would notice. */
+const AVATAR_STATES = ['idle','listening','thinking','speaking'];
+const avatarEl = document.getElementById('avatar');
+const avatarUrl = {};
+let hasAvatar = false;
+
+function loadImage(src){
+  return new Promise(done => {
+    const img = new Image();
+    img.onload  = () => done(img.naturalWidth > 0 ? src : null);
+    img.onerror = () => done(null);
+    img.src = src;
+  });
+}
+
+// webp first: typically a third the size of the same PNG at this quality, and
+// every browser this page runs on supports it.
+async function findImage(name){
+  return (await loadImage('/avatar/' + name + '.webp'))
+      || (await loadImage('/avatar/' + name + '.png'));
+}
+
+function applyAvatar(state){
+  if (!hasAvatar) return;
+  const url = avatarUrl[state] || avatarUrl.default;
+  if (url) avatarEl.style.backgroundImage = 'url("' + url + '")';
+}
+
+async function avatarInit(){
+  const base = await findImage('default');
+  if (!base) return;                       // no artwork: stay an orb
+  avatarUrl.default = base;
+  hasAvatar = true;
+  document.body.classList.add('has-avatar');
+  applyAvatar(currentState());
+  // Loaded after the default is already showing, so the character appears
+  // immediately and simply gets more expressive a moment later.
+  for (const s of AVATAR_STATES){
+    const url = await findImage(s);
+    if (url){ avatarUrl[s] = url; if (currentState() === s) applyAvatar(s); }
+  }
+}
+
+function currentState(){
+  return document.body.classList.contains('listening') ? 'listening'
+       : document.body.classList.contains('thinking')  ? 'thinking'
+       : document.body.classList.contains('speaking')  ? 'speaking' : 'idle';
+}
+
 function setState(s, text){
-  document.body.className = s;
+  // className is REPLACED rather than added to, so has-avatar has to be
+  // reapplied here or the character vanishes on the first state change.
+  document.body.className = hasAvatar ? s + ' has-avatar' : s;
+  applyAvatar(s);
   if (text !== undefined) statusEl.textContent = text;
 }
 let ampVal = 0;
@@ -3259,11 +3679,14 @@ if (standaloneApp && MODE === 'none'){
    true, and a wrist-mounted screen is the worst place to find a hung UI. */
 setInterval(() => {
   if (busy || listening || speakingNow()) return;
-  if (document.body.className !== 'idle') setState('idle', idleHint());
+  // classList, not string equality: with an avatar loaded the class attribute
+  // is "idle has-avatar", which never equals "idle".
+  if (!document.body.classList.contains('idle')) setState('idle', idleHint());
 }, 1000);
 
 /* ============ init ============ */
 restoreHistory();
+avatarInit();                       // swaps the orb for a character, if one exists
 memLoad();                          // durable facts about the user
 timersRestore();                    // timers survive the app being torn down
 applySpeakPref();                   // reflect the remembered voice/text choice

@@ -237,6 +237,9 @@ services:
       # Self-hosted IBM Plex Mono, 45 KB for three weights. A webfont CDN would
       # be one more thing that has to work on a hillside; this does not.
       - ./fonts:/usr/share/nginx/html/fonts:ro
+      # Character avatar, optional. Empty by default and the page falls back to
+      # the orb, so a deployment with no artwork in it is not a broken one.
+      - ./avatar:/usr/share/nginx/html/avatar:ro
       - ./mem:/var/lib/orb/mem          # writable: WebDAV memory store
     depends_on:
       - llama

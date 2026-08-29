@@ -1,0 +1,5 @@
+# Artwork is the user's own and is not committed; the directory and its
+# README are, so a fresh clone knows the feature exists and what it wants.
+*
+!.gitignore
+!README.txt
