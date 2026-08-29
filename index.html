@@ -1538,7 +1538,16 @@ async function memLoad(){
     const r = await fetch(MEM_DIR, { cache:'no-store' });
     if (!r.ok) throw new Error('no listing');
     const entries = await r.json();                 // nginx autoindex_format json
-    const files = entries.filter(e => e.type === 'file' && /\.md$/i.test(e.name))
+    // Only the small files come down. Anything longer than a fact is a
+    // document, and documents are searched server-side by /recall — the vault
+    // is ~300 notes, and fetching all of them before the first question meant
+    // 300 round trips over Tailscale on a phone.
+    //
+    // The size filter uses nginx's autoindex JSON, so it costs nothing extra.
+    // FACT_MAX is a body limit and the file also carries frontmatter, hence
+    // the allowance on top.
+    const files = entries.filter(e => e.type === 'file' && /\.md$/i.test(e.name)
+                                   && (e.size == null || e.size < FACT_MAX + 260))
                          .map(e => e.name)
                          .slice(0, MEM_MAX);
     const loaded = await Promise.all(files.map(async f => {
@@ -1609,7 +1618,22 @@ function memRelevant(query){
 
 // Long notes: retrieved, not always-injected. Same reasoning as the Wikipedia
 // gate — an irrelevant note in the prompt is worse than no note.
-function memNote(query){
+async function memNote(query){
+  // Server-side first: it holds the whole vault, does rarity-weighted whole-word
+  // matching, and knows that "tls" names Transport Layer Security.
+  try {
+    const r = await fetch('/recall?q=' + encodeURIComponent(query), { cache:'no-store' });
+    if (r.ok){
+      const j = await r.json();
+      if (j && j.hit) return { title: j.hit.title, text: j.hit.text };
+    }
+  } catch {}
+  return memNoteLocal(query);
+}
+
+// Fallback: whatever notes this browser happens to hold. Only reachable if the
+// router is unavailable, in which case a weaker search beats none.
+function memNoteLocal(query){
   const notes = memories.filter(m => m.note);
   if (!notes.length) return null;
   const terms = keyTerms(query);
@@ -2432,7 +2456,7 @@ async function send(text){
   // The user's own notes come first: if one matches, it is more relevant than
   // an encyclopedia article, and using only one source keeps the prompt tight
   // and avoids handing the model two accounts that may disagree.
-  const note = memNote(askText);
+  const note = await memNote(askText);
   if (note) trace('\u{1F5D2}️ ' + note.title);
 
   let ref = null;

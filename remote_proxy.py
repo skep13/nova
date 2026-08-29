@@ -624,6 +624,305 @@ async def place(request):
                               "addresses_cached": len(_addr_cache)})
 
 
+# --- document ingest --------------------------------------------------------
+# Drop a file in, get a note out. The vault IS the assistant's knowledge, and
+# retyping a document into it is exactly the friction that means it never
+# happens.
+#
+# .docx needs no library: it is a zip whose word/document.xml holds the text in
+# <w:t> elements. Pulling those out is a dozen lines and adds no dependency to
+# a container that currently installs precisely one package.
+#
+# PDF is deliberately NOT handled, for the same reason inverted: every option
+# is a real dependency, and silently bad text extraction is worse than an
+# honest refusal that tells you to convert it first.
+MEM_DIR = pathlib.Path(os.environ.get("MEM_DIR", "/mem"))
+INGEST_MAX = int(os.environ.get("INGEST_MAX_BYTES", str(8 * 1024 * 1024)))
+TEXT_EXT = (".md", ".markdown", ".txt", ".text", ".csv", ".json", ".log", ".yaml", ".yml")
+
+
+def docx_text(blob):
+    import zipfile, io as _io, html as _html
+    with zipfile.ZipFile(_io.BytesIO(blob)) as z:
+        xml = z.read("word/document.xml").decode("utf-8", "replace")
+    # Structure first: without this every paragraph runs into the next one and
+    # the note arrives as a single unreadable wall.
+    xml = re.sub(r"</w:p>", "\n\n", xml)
+    xml = re.sub(r"<w:br[^>]*/>", "\n", xml)
+    xml = re.sub(r"<w:tab[^>]*/>", "    ", xml)
+    parts = re.findall(r"<w:t[^>]*>(.*?)</w:t>", xml, re.S)
+    text = "".join(parts) if parts else re.sub(r"<[^>]+>", "", xml)
+    text = _html.unescape(text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def html_text(blob):
+    import html as _html
+    t = blob.decode("utf-8", "replace")
+    t = re.sub(r"(?is)<(script|style).*?</\1>", " ", t)
+    t = re.sub(r"(?is)</(p|div|h[1-6]|li|tr)>", "\n", t)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = _html.unescape(t)
+    t = re.sub(r"[ \t]+", " ", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def to_text(name, blob):
+    low = (name or "").lower()
+    if low.endswith(".docx"):
+        return docx_text(blob)
+    if low.endswith((".htm", ".html")):
+        return html_text(blob)
+    if low.endswith(TEXT_EXT):
+        return blob.decode("utf-8", "replace").strip()
+    return None
+
+
+async def ingest(request):
+    """A multipart upload becomes a note in the vault."""
+    try:
+        reader = await request.multipart()
+    except Exception:
+        return web.json_response({"error": "expected a file upload"}, status=400)
+
+    name, blob, title = None, None, None
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "title":
+            title = (await part.text()).strip()
+        elif part.name == "file":
+            name = part.filename or "upload"
+            blob = await part.read(decode=False)
+            if len(blob) > INGEST_MAX:
+                mb = INGEST_MAX // 1024 // 1024
+                return web.json_response({"error": f"file is larger than {mb} MB"}, status=413)
+
+    if not blob:
+        return web.json_response({"error": "no file received"}, status=400)
+
+    try:
+        text = to_text(name, blob)
+    except Exception as exc:
+        return web.json_response({"error": f"could not read that file: {exc}"}, status=422)
+
+    if text is None:
+        ext = pathlib.Path(name).suffix or "that"
+        return web.json_response(
+            {"error": f"cannot read {ext} files. Supported: docx, md, txt, csv, json, html. "
+                      "For a PDF, export it as text or Word first."}, status=415)
+    if not text.strip():
+        return web.json_response({"error": "that file had no readable text in it"}, status=422)
+
+    stem = pathlib.Path(name).stem
+    title = title or re.sub(r"[-_]+", " ", stem).strip() or "Uploaded note"
+    now = datetime.datetime.now()
+    fname = f"{slug(stem, 60)}-{now.strftime('%H%M%S')}.md"
+    doc = ("---\n"
+           f"created: {now.isoformat(timespec='seconds')}\n"
+           f"title: {title}\n"
+           "tags: [uploaded]\n"
+           f"source: {name}\n"
+           "---\n\n"
+           f"# {title}\n\n{text}\n")
+    try:
+        MEM_DIR.mkdir(parents=True, exist_ok=True)
+        (MEM_DIR / fname).write_text(doc, encoding="utf-8")
+    except Exception as exc:
+        return web.json_response({"error": f"could not write the note: {exc}"}, status=500)
+
+    return web.json_response({"ok": True, "file": fname, "title": title,
+                              "characters": len(text)})
+
+
+# --- vault search -----------------------------------------------------------
+# The page used to download every note in /mem on load and search them in the
+# browser. That was fine at fourteen notes and is untenable at three hundred:
+# three hundred round trips over Tailscale before the first question, and the
+# page capped out at two hundred files anyway, so the rest were invisible.
+#
+# So the search moves here, next to the disk. The scoring deliberately mirrors
+# what the page did — title matches weigh triple, a score of three fires — so
+# behaviour does not change, only where it happens. Short notes stay in the
+# browser: those are standing facts about the user, they are tiny, and they are
+# injected on every turn rather than searched.
+VAULT_DIR = pathlib.Path(os.environ.get("MEM_DIR", "/mem"))
+NOTE_CHARS = 900          # excerpt budget, matching the page
+FACT_MAX = 240            # below this a note is a fact, not a document
+
+_vault = []               # [{file, title, body, mtime}]
+_vault_stamp = 0.0
+
+
+def _vault_mtime():
+    try:
+        return max((p.stat().st_mtime for p in VAULT_DIR.glob("*.md")), default=0.0)
+    except Exception:
+        return 0.0
+
+
+def load_vault(force=False):
+    """Read the vault into memory, refreshing when a file changes on disk.
+
+    Cheap enough to check on every query: it stats the directory, not the
+    contents. Obsidian syncing a note in must be visible without a restart.
+    """
+    global _vault, _vault_stamp
+    stamp = _vault_mtime()
+    if not force and stamp == _vault_stamp and _vault:
+        return
+    notes = []
+    try:
+        for p in sorted(VAULT_DIR.glob("*.md")):
+            try:
+                raw = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            body, title = raw, ""
+            fm = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?", raw, re.S)
+            if fm:
+                body = raw[fm.end():]
+                t = re.search(r"^title:\s*(.+)$", fm.group(1), re.M)
+                if t:
+                    title = t.group(1).strip()
+            h = re.search(r"^#\s+(.+)$", body, re.M)
+            if not title and h:
+                title = h.group(1).strip()
+            body = re.sub(r"^#\s+.+$", "", body, count=1, flags=re.M).strip()
+            if not body or len(body) <= FACT_MAX:
+                continue                      # a fact, handled in the browser
+            notes.append({"file": p.name, "title": title or p.stem, "body": body})
+    except Exception:
+        pass
+    _vault, _vault_stamp = notes, stamp
+
+
+_STOP = set("""a an the is are was were be been being am of in on at to for with and or but if then
+than that this these those it its as by from what who whom when where why how do does did done can
+could should would will shall may might must i you he she they we us me my your our their his her
+about tell explain say know think give show please just really very some any there here so no yes
+not have has had get got make made take put see look want need use using""".split())
+
+
+def key_terms(q):
+    q = re.sub(r"[^a-z0-9\s]", " ", (q or "").lower())
+    return [w for w in q.split() if len(w) > 2 and w not in _STOP]
+
+
+def _stem(w):
+    """Crude suffix stripping so scheduler/scheduling and hash/hashing meet.
+
+    Not a real stemmer and does not need to be: it only has to make obvious
+    word forms collide. Anything under five characters is left alone, because
+    that is where over-stemming starts turning distinct words into each other.
+    """
+    for suf in ("ational", "ization", "isation", "ingly", "edly", "ing", "ers",
+                "er", "ed", "es", "s"):
+        if len(w) - len(suf) >= 5 and w.endswith(suf):
+            return w[: -len(suf)]
+    return w
+
+
+def _words(text):
+    return {_stem(w) for w in re.findall(r"[a-z0-9]+", text.lower())}
+
+
+def _aliases(title, body):
+    """Acronyms this note is actually known BY, not ones it merely mentions.
+
+    A Wikipedia lede introduces itself as "Transport Layer Security (TLS)", so
+    the parenthetical is a real alias. But CSRF's lede also mentions XSS, and a
+    first pass that accepted any parenthetical gave that note title-level
+    weight for "xss" — so asking about XSS returned the article that referenced
+    it rather than the one that defines it.
+
+    Two tests, either of which is good enough: the acronym matches the initials
+    of this title, or it appears in the opening clause, which is where an
+    article names itself and nowhere else.
+    """
+    out = set()
+    letters = [w for w in re.findall(r"[A-Za-z]+", title) if len(w) > 2]
+    initials = "".join(w[0] for w in letters).lower() if len(letters) >= 2 else ""
+    if initials:
+        out.add(initials)
+    for m in re.finditer(r"\(([A-Z][A-Za-z0-9]{1,9})\)", body[:170]):
+        out.add(m.group(1).lower())
+    return {a for a in out if len(a) >= 2}
+
+
+def _build_index():
+    """Word sets per note, plus how many notes each word appears in.
+
+    Substring matching was the original bug: "work" matched netWORK and sent
+    "how does tls work" to Artificial neural network. Whole words fix that.
+    Rarity fixes the other half — without it "transformer in machine learning"
+    scores higher for the broad note than the specific one.
+    """
+    for n in _vault:
+        if "_tw" not in n:
+            n["_al"] = _aliases(n["title"], n["body"])
+            n["_tw"] = _words(n["title"])
+            n["_bw"] = _words(n["body"])
+    df = {}
+    for n in _vault:
+        for w in n["_tw"] | n["_bw"] | n["_al"]:
+            df[w] = df.get(w, 0) + 1
+    return df
+
+
+def search_vault(query):
+    """Best matching note, as a 900-char excerpt centred on the match."""
+    load_vault()
+    raw_terms = key_terms(query)
+    terms = [_stem(w) for w in raw_terms]
+    if not terms or not _vault:
+        return None
+    df = _build_index()
+    total = len(_vault)
+
+    best, best_score = None, 0.0
+    for n in _vault:
+        score = 0.0
+        for w in terms:
+            if w not in n["_tw"] and w not in n["_bw"] and w not in n["_al"]:
+                continue
+            # Inverse document frequency: a word in three notes says far more
+            # about which note you want than a word in two hundred.
+            rarity = math.log(1 + total / max(1, df.get(w, 1)))
+            # An acronym outranks a title word deliberately. "DNS" is a literal
+            # title word of "DNS spoofing" but only the ALIAS of "Domain Name
+            # System" — and someone asking "what is dns" wants the latter. An
+            # acronym is a name for the thing, not a mention of it.
+            weight = 4.0 if w in n["_al"] else (3.0 if w in n["_tw"] else 1.0)
+            score += rarity * weight
+        if score > best_score:
+            best, best_score = n, score
+
+    if not best or best_score < 2.0:
+        return None
+
+    low = best["body"].lower()
+    at = 0
+    for w in sorted(raw_terms, key=lambda x: df.get(_stem(x), 1)):   # rarest first
+        m = re.search(r"\b" + re.escape(w), low)
+        if m:
+            at = max(0, m.start() - 200)
+            break
+    text = best["body"][at:at + NOTE_CHARS]
+    if at > 0:
+        text = "..." + text
+    if at + NOTE_CHARS < len(best["body"]):
+        text += "..."
+    return {"title": best["title"], "text": text,
+            "file": best["file"], "score": round(best_score, 2)}
+
+
+async def recall(request):
+    hit = search_vault(request.query.get("q", ""))
+    return web.json_response({"hit": hit, "notes_indexed": len(_vault)})
+
+
 async def diag(request):
     """One-line-per-event diagnostic sink for the page.
 
@@ -680,6 +979,8 @@ app.add_routes([
     web.get("/agents", agents),
     web.post("/diag", diag),
     web.get("/place", place),
+    web.get("/recall", recall),
+    web.post("/ingest", ingest),
 ])
 
 if __name__ == "__main__":

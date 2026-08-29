@@ -134,6 +134,9 @@ services:
       - ./logs:/logs
       - ./keys:/run/keys:ro
       - ./data:/data:ro
+      # Writable: uploaded documents become notes here. Same directory the page
+      # reads and Obsidian syncs, so an upload appears everywhere at once.
+      - ./mem:/mem
     depends_on:
       - llama
     deploy:
@@ -142,6 +145,26 @@ services:
           # Raised from 128m: the place list is held in memory so a lookup is
           # a bisect and a few hundred haversines rather than a file read.
           memory: 256m
+
+  # Real WebDAV over the notes vault, so Obsidian can sync it from a phone and
+  # a laptop. nginx's dav module does PUT and DELETE but NOT PROPFIND, which is
+  # what a WebDAV client needs to list a directory — the existing /mem/ endpoint
+  # is enough for the Orb page and returns 405 to Obsidian.
+  #
+  # Credentials are generated on the server into ./webdav/password (mode 600)
+  # and stored here only as a bcrypt hash.
+  webdav:
+    image: hacdias/webdav:latest
+    container_name: orb-webdav
+    restart: unless-stopped
+    command: ["--config", "/config/config.yml"]
+    volumes:
+      - ./mem:/data
+      - ./webdav:/config:ro
+    deploy:
+      resources:
+        limits:
+          memory: 96m
 
   # Offline full English Wikipedia (~50 GB, no images). Costs disk, not RAM —
   # kiwix-serve mmaps the archive, so a 50 GB dump is barely dearer in memory
