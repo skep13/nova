@@ -1453,15 +1453,35 @@ def autolink(text):
         targets.append((title, stem))
     targets.sort(key=lambda t: len(t[0]), reverse=True)   # longest wins first
 
+    # Links already written are masked out before the next pass looks for a
+    # match. Without this the linker finds a title INSIDE a stem it wrote
+    # moments earlier: [[relational-database|...]] contains "database", which
+    # matched and produced [[relational-[[database]] — a broken link nested in
+    # another broken link. The lookbehind and lookahead do not prevent it,
+    # because the characters either side of the inner match are a hyphen and a
+    # pipe, not brackets.
+    holes = []
+
+    def stash(m):
+        holes.append(m.group(0))
+        return "\x00%d\x00" % (len(holes) - 1)
+
+    def restore(m):
+        return holes[int(m.group(1))]
+
     used = set()
     for title, stem in targets:
         if stem in used:
             continue
+        holes.clear()
+        masked = re.sub(r"\[\[[^\]]*\]\]", stash, text)
         pat = re.compile(r"(?<!\[)\b(" + re.escape(title) + r")\b(?!\])", re.I)
-        m = pat.search(text)
+        m = pat.search(masked)
         if m:
-            text = text[:m.start()] + "[[" + stem + "|" + m.group(1) + "]]" + text[m.end():]
+            masked = (masked[:m.start()] + "[[" + stem + "|" + m.group(1) + "]]"
+                      + masked[m.end():])
             used.add(stem)
+        text = re.sub(r"\x00(\d+)\x00", restore, masked)
     return text, sorted(used)
 
 
@@ -1689,7 +1709,10 @@ async def research(request):
             {"error": "nothing found for that in the vault or the offline archive"},
             status=404)
 
-    title = question.rstrip("?").strip()
+    # A caller that knows the subject can name it. Generated notes are titled
+    # after the question otherwise, which reads fine for "how does X work" and
+    # badly for a batch where every title starts with the same three words.
+    title = (payload.get("title") or "").strip() or question.rstrip("?").strip()
     title = title[:1].upper() + title[1:]
     messages = research_prompt(question, vault_hit, articles)
 

@@ -158,6 +158,76 @@ RULES = {
           "root cause", "postmortem", "runbook", "observability", "telemetry",
           "time synchronization", "network time protocol", "public key certificate"]),
     ],
+    "wellbeing": [
+        ("mental-health", "Conditions, what they are, and what helps.",
+         ["depress", "anxiety", "bipolar", "obsessive", "panic", "phobia",
+          "post-traumatic", "attention deficit", "autism", "eating disorder",
+          "seasonal affective", "suicide", "addiction", "substance"]),
+        ("therapy-and-coping", "Ways through: professional, practical and personal.",
+         ["psychotherapy", "counseling", "counselling", "serotonin", "coping",
+          "resilience", "sleep hygiene", "motivational interviewing",
+          "group psychotherapy", "assertiveness"]),
+        ("feelings-and-people", "Emotions, and the relationships they happen in.",
+         ["loneliness", "grief", "empathy", "compassion", "forgiveness",
+          "gratitude", "happiness", "well-being", "emotion", "anger", "fear",
+          "shame", "trust", "friendship", "social support", "interpersonal",
+          "burnout", "work"]),
+    ],
+    "culture": [
+        ("music", "Sound organised on purpose.",
+         ["music", "notation", "rhythm", "harmony", "melody", "jazz", "guitar",
+          "piano", "orchestra"]),
+        ("film-and-image", "Pictures, moving and still.",
+         ["film", "cinemato", "editing", "screenwriting", "documentary",
+          "animation", "photography", "composition", "color theory", "painting",
+          "sculpture", "graphic design", "typography", "drawing"]),
+        ("words-and-belief", "Stories people tell, and what they believe.",
+         ["literature", "novel", "poetry", "shakespeare", "mythology", "folklore",
+          "religion", "christianity", "islam", "buddhism", "hinduism", "judaism",
+          "aesthetics", "theatre"]),
+        ("play-and-places", "Games, and where culture is kept.",
+         ["chess", "board game", "video game", "museum", "dance", "architecture"]),
+    ],
+    "nature": [
+        ("animals", "What moves, and how it lives.",
+         ["animal", "mammal", "bird", "fish", "insect", "reptile", "amphibian",
+          "dog", "cat", "horse", "bee", "butterfly", "spider", "migration",
+          "hibernation", "nocturnality", "camouflage"]),
+        ("plants-and-fungi", "What grows.",
+         ["tree", "flower", "fungus", "moss", "seed", "pollination", "soil"]),
+        ("weather-and-land", "The sky, the water and the ground.",
+         ["weather", "cloud", "rain", "snow", "thunderstorm", "wind", "tide",
+          "river", "mountain", "forest", "desert", "wetland", "coral"]),
+        ("ecology", "How all of it fits together, and what is being lost.",
+         ["biodiversity", "extinction", "conservation"]),
+    ],
+    "skills": [
+        ("communicating", "Getting an idea from your head into someone else's.",
+         ["public speaking", "writing", "note-taking", "reading", "typing",
+          "language acquisition", "translation", "sign language", "braille",
+          "handwriting", "speed reading"]),
+        ("making-and-mending", "Doing things with your hands.",
+         ["knot", "sewing", "knitting", "woodworking", "carpentry", "baking",
+          "home repair", "cleaning", "origami"]),
+        ("moving-and-outdoors", "Sport, and getting about outside.",
+         ["swimming", "running", "cycling", "yoga", "orienteering", "camping",
+          "hiking", "fishing", "climbing", "juggling"]),
+        ("remembering", "Techniques for holding on to things.",
+         ["memory technique", "method of loci"]),
+    ],
+    "nova": [
+        ("how-it-works", "The prose: architecture, failure modes, recovery.",
+         ["nova architecture", "nova endpoints", "nova agents", "nova vault",
+          "nova retrieval", "nova research", "nova backups", "nova health",
+          "nova voice", "nova deploying", "nova recovery", "nova design",
+          "orb "]),
+        ("source-router", "remote_proxy.py: routing, retrieval, research, health.",
+         ["remote_proxy"]),
+        ("source-config", "How requests are routed and services are declared.",
+         ["nginx.conf", "docker-compose"]),
+        ("source-tools", "The watcher, the sandbox and the backup.",
+         ["nova-maintain", "sandbox_server", "orb-backup"]),
+    ],
     "home": [
         ("storage-and-data", "Disks, filesystems and the copies that survive them.",
          ["raid", "zfs", "btrfs", "network-attached", "solid-state", "hard disk",
@@ -277,6 +347,11 @@ RULES = {
 }
 
 FALLBACK = {
+    "wellbeing": ("wellbeing-general", "Mental health and emotional ground, uncategorised."),
+    "culture": ("culture-general", "Arts and belief that did not fit a narrower topic."),
+    "nature": ("nature-general", "The living world, uncategorised."),
+    "skills": ("skills-general", "Practical skills that span the other groupings."),
+    "nova": ("nova-general", "Nova itself, uncategorised."),
     "code": ("programming-general", "Programming ground that did not fit a narrower topic."),
     "ops": ("operations-general", "Running and maintaining systems, uncategorised."),
     "home": ("homelab-general", "Self-hosting ground that did not fit a narrower topic."),
@@ -304,7 +379,11 @@ DOMAINS = [
     ("home", "Homelab and Infrastructure", "Storage, networking and the servers this assistant runs on."),
     ("make", "Making and Electronics", "3D printing, circuits and the workshop."),
     ("field", "Field and Outdoors", "Casualty care, environmental injury and navigation."),
-    ("nova", "Nova Itself", "How this assistant is built, how it fails, and how to fix it."),
+    ("nova", "Nova Itself", "How this assistant is built, how it fails, and how to fix it \u2014 including its own source."),
+    ("wellbeing", "Wellbeing", "Mental health, emotions, and the people around you."),
+    ("culture", "Culture", "Music, film, art, writing, belief and games."),
+    ("nature", "The Natural World", "Animals, plants, weather and the systems they sit in."),
+    ("skills", "Skills", "Things worth being able to do."),
     ("code", "Programming", "Languages, testing, debugging and the craft of writing software."),
     ("ops", "Operations", "Running systems: deployment, reliability, monitoring and recovery."),
 ]
@@ -375,7 +454,6 @@ def main():
         tm.write_text(THREAT_MODEL.format(now=NOW), encoding="utf-8")
 
     buckets = {}
-    orb = []
     for p in sorted(VAULT.glob("*.md")):
         if p.stem.startswith("moc-") or p.stem == "index":
             continue
@@ -384,25 +462,19 @@ def main():
             continue
         domain = next((d for d in ("security", "ai", "cs", "field", "home", "make",
                                    "life", "health", "mind", "world", "sci",
-                                   "code", "ops")
+                                   "code", "ops", "wellbeing",
+                                   "culture", "nature", "skills", "nova")
                        if d in tags), None)
-        if "nova" in tags:
-            orb.append((title, p.stem))
-            continue
+        # Nova used to be diverted into a flat list here, which was right when
+        # it held six notes and wrong now it holds 134 — most of them source
+        # code, which belongs in its own topic rather than beside the prose that
+        # describes it.
         if not domain:
             continue
         buckets.setdefault(domain, {}).setdefault(classify(title, domain), []).append((title, p.stem))
 
     made = 0
     for domain, dom_title, dom_desc in DOMAINS:
-        if domain == "nova":
-            lines = [f"- [[{s}|{t}]]" for t, s in sorted(orb)]
-            body = (frontmatter(dom_title, ["moc", "orb"])
-                    + f"# {dom_title}\n\n{dom_desc}\n\n" + "\n".join(lines)
-                    + "\n\nBack to [[index|Index]].\n")
-            (VAULT / "moc-nova.md").write_text(body, encoding="utf-8")
-            made += 1
-            continue
 
         topics = buckets.get(domain, {})
         # Ordered as the rules are, so a domain hub reads in a deliberate
@@ -440,9 +512,6 @@ def main():
 
     print(f"  hub notes written: {made} (+ index)")
     for domain, dom_title, _ in DOMAINS:
-        if domain == "nova":
-            print(f"  {dom_title:24} {len(orb):3} notes")
-            continue
         topics = buckets.get(domain, {})
         print(f"  {dom_title:24} {sum(len(v) for v in topics.values()):3} notes / {len(topics)} topics")
         for t in sorted(topics, key=lambda k: -len(topics[k])):
