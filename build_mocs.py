@@ -122,6 +122,146 @@ RULES = {
           "kubernetes", "continuous integration", "regular expression",
           "unicode", "utf-8", "base64"]),
     ],
+    "code": [
+        ("languages", "The languages themselves, and what each is for.",
+         ["programming language", "python", "shell script", "bash", "javascript",
+          "c (programming", "rust", "go (programming"]),
+        ("testing-and-debugging", "Finding out that it is wrong, and finding out why.",
+         ["debugging", "software bug", "unit testing", "test-driven",
+          "regression testing", "code review", "technical debt", "refactoring",
+          "logging", "memory leak", "race condition"]),
+        ("writing-code", "The constructs every language argues about differently.",
+         ["object-oriented", "functional programming", "recursion", "variable",
+          "data type", "type system", "pointer", "memory management",
+          "exception handling", "callback", "serialization", "idempotence",
+          "defensive programming", "design pattern"]),
+        ("tools-and-formats", "Everything around the code: building it, shipping it, reading it.",
+         ["application programming interface", "library", "framework",
+          "package manager", "integrated development", "vim", "json", "xml",
+          "yaml", "character encoding", "command-line", "environment variable",
+          "exit status", "standard streams", "pipeline", "make (", "linker",
+          "bytecode", "versioning", "documentation", "algorithm",
+          "parallel computing", "asynchronous", "fail-safe"]),
+    ],
+    "ops": [
+        ("reliability", "Designing for the day something breaks, because it will.",
+         ["high availability", "fault tolerance", "redundancy",
+          "single point of failure", "mean time between", "service-level",
+          "chaos engineering"]),
+        ("deployment", "Getting a change into production without taking it down.",
+         ["continuous deployment", "rollback", "blue-green", "canary",
+          "infrastructure as code", "configuration management",
+          "capacity planning"]),
+        ("running-systems", "The day-to-day of keeping machines alive and observable.",
+         ["proxmox", "os-level virtualization", "cgroups", "file-system permissions",
+          "iptables", "log file", "network monitoring", "system administrator",
+          "root cause", "postmortem", "runbook", "observability", "telemetry",
+          "time synchronization", "network time protocol", "public key certificate"]),
+    ],
+    "home": [
+        ("storage-and-data", "Disks, filesystems and the copies that survive them.",
+         ["raid", "zfs", "btrfs", "network-attached", "solid-state", "hard disk",
+          "s.m.a.r.t", "backup", "disaster recovery", "network file system", "samba"]),
+        ("networking-and-access", "Getting traffic to the right box, from inside or out.",
+         ["reverse proxy", "load balancing", "nginx", "dynamic dns", "port forwarding",
+          "virtual lan", "wi-fi", "bluetooth", "network switch", "router",
+          "power over ethernet", "wake-on-lan"]),
+        ("servers-and-automation", "The machines themselves, and the jobs that keep them honest.",
+         ["virtualization", "hypervisor", "systemd", "cron", "rsync", "syslog",
+          "home automation", "mqtt", "zigbee", "raspberry pi", "single-board",
+          "uninterruptible"]),
+    ],
+    "make": [
+        ("printing-and-cad", "Turning a model on screen into an object on the bench.",
+         ["3d printing", "fused filament", "stereolithography", "g-code",
+          "computer-aided design", "polylactic", "acrylonitrile", "nylon", "adhesive"]),
+        ("electronics", "Components, the laws they obey, and the tools that show you.",
+         ["soldering", "printed circuit", "breadboard", "resistor", "capacitor",
+          "inductor", "diode", "light-emitting", "transistor", "operational amplifier",
+          "microcontroller", "arduino", "field-programmable", "multimeter",
+          "oscilloscope", "ohm", "direct current", "alternating current", "battery",
+          "lithium-ion", "pulse-width", "stepper", "servomotor"]),
+        ("workshop-and-fabrication", "Cutting, joining and holding things together.",
+         ["bearing", "screw thread", "torque", "welding", "machining",
+          "injection", "laser cutting", "numerical control"]),
+    ],
+    "life": [
+        ("food-and-kitchen", "Cooking, keeping food safe, and what is actually in it.",
+         ["cooking", "food safety", "foodborne", "refrigeration", "fermentation",
+          "bread", "coffee", "tea", "human nutrition"]),
+        ("money-and-paperwork", "The admin that costs you if you ignore it.",
+         ["personal finance", "compound interest", "interest rate", "inflation",
+          "index fund", "pension", "insurance", "mortgage", "credit score",
+          "income tax", "value-added", "budget", "contract", "consumer protection",
+          "lease", "will and testament", "power of attorney"]),
+        ("vehicles", "Keeping something on the road.",
+         ["motor oil", "tire", "brake", "internal combustion", "electric vehicle",
+          "bicycle"]),
+        ("house-and-garden", "Maintaining the building you live in.",
+         ["plumbing", "electrical wiring", "insulation", "central heating", "mold",
+          "laundry", "recycling", "waste", "gardening", "compost"]),
+    ],
+    "health": [
+        ("food-sleep-and-substances", "Inputs: what you eat, drink and how you rest.",
+         ["vitamin", "protein", "carbohydrate", "fiber", "sleep", "circadian",
+          "insomnia", "caffeine", "alcohol", "tobacco"]),
+        ("fitness-and-the-body", "How the machine is built and how to keep it working.",
+         ["exercise", "aerobic", "strength training", "stretching", "physical fitness",
+          "body mass", "blood pressure", "cholesterol", "posture", "skin",
+          "human eye", "hearing", "dentistry"]),
+        ("illness-and-mental-health", "What goes wrong, and what helps.",
+         ["diabetes", "immune", "vaccine", "antibiotic", "analgesic", "common cold",
+          "influenza", "headache", "migraine", "allergy", "asthma", "mental health",
+          "anxiety", "depressive", "stress", "meditation", "mindfulness"]),
+    ],
+    "mind": [
+        ("thinking-and-bias", "How reasoning goes wrong, and how to check it.",
+         ["cognitive bias", "confirmation bias", "critical thinking", "fallacy",
+          "occam", "scientific method", "logic", "decision-making", "game theory",
+          "prisoner", "intelligence"]),
+        ("learning-and-habits", "Getting things into your head, and getting things done.",
+         ["memory", "spaced repetition", "learning", "motivation", "habit",
+          "procrastination", "attention", "flow", "time management", "creativity"]),
+        ("psychology-and-philosophy", "What people are like, and how to live.",
+         ["psychology", "emotional intelligence", "big five", "maslow",
+          "conditioning", "cognitive behavioral", "philosophy", "ethics", "stoicism",
+          "existentialism", "epistemology", "utilitarianism", "free will",
+          "consciousness", "rhetoric", "negotiation"]),
+    ],
+    "world": [
+        ("history", "How the present got here.",
+         ["ancient", "middle ages", "renaissance", "enlightenment",
+          "industrial revolution", "world war", "cold war", "space race"]),
+        ("society-and-economy", "Institutions, money and the rules everyone runs on.",
+         ["globalization", "united nations", "european union", "united kingdom",
+          "democracy", "constitution", "rule of law", "human rights", "capitalism",
+          "socialism", "economics", "supply and demand", "gross domestic",
+          "central bank", "stock market", "cryptocurrency", "bitcoin"]),
+        ("earth-and-energy", "The planet, and how it is powered.",
+         ["climate", "renewable", "solar power", "wind power", "nuclear power",
+          "electrical grid", "agriculture", "public transport", "geography",
+          "plate tectonics", "ocean", "atmosphere", "time zone", "calendar",
+          "cartography"]),
+    ],
+    "sci": [
+        ("mathematics", "The language the rest of it is written in.",
+         ["mathematics", "algebra", "geometry", "calculus", "derivative", "integral",
+          "probability", "statistics", "normal distribution", "standard deviation",
+          "correlation", "prime number", "logarithm", "trigonometry", "measurement",
+          "international system"]),
+        ("physics", "Matter, energy and the rules they follow.",
+         ["physics", "classical mechanics", "newton", "energy", "thermodynamics",
+          "entropy", "electromagnetism", "light", "optics", "sound", "wave",
+          "quantum", "relativity", "gravity"]),
+        ("chemistry-and-materials", "What things are made of and how they react.",
+         ["atom", "periodic table", "chemical bond", "acid", "chemical reaction",
+          "redox", "organic chemistry", "polymer", "water"]),
+        ("life-sciences", "Living systems, from a cell upward.",
+         ["biology", "cell", "dna", "gene", "evolution", "natural selection",
+          "photosynthesis", "bacteria", "virus", "ecosystem"]),
+        ("astronomy", "Everything further away than the weather.",
+         ["astronomy", "solar system", "star", "galaxy", "black hole"]),
+    ],
     "field": [
         ("environmental-injury", "What cold, heat, altitude and terrain do to a body.",
          ["hypothermia", "hyperthermia", "heat illness", "frostbite",
@@ -137,6 +277,15 @@ RULES = {
 }
 
 FALLBACK = {
+    "code": ("programming-general", "Programming ground that did not fit a narrower topic."),
+    "ops": ("operations-general", "Running and maintaining systems, uncategorised."),
+    "home": ("homelab-general", "Self-hosting ground that did not fit a narrower topic."),
+    "make": ("workshop-general", "Making and building, uncategorised."),
+    "life": ("life-general", "Practical everyday knowledge that spans the other groupings."),
+    "health": ("health-general", "General health that did not fit a narrower topic."),
+    "mind": ("mind-general", "Thinking and behaviour, uncategorised."),
+    "world": ("world-general", "History, society and the planet, uncategorised."),
+    "sci": ("science-general", "Science that did not fit a narrower topic."),
     "security": ("security-foundations", "The vocabulary the rest of the security notes assume."),
     "ai": ("ml-foundations", "The ideas every other AI note is built on top of."),
     "cs": ("computing-foundations", "General computing ground that did not fit a narrower topic."),
@@ -147,8 +296,17 @@ DOMAINS = [
     ("security", "Security", "Offensive and defensive security, cryptography and the standards around them."),
     ("ai", "AI and Machine Learning", "From linear regression to transformers, plus how models are evaluated and where they go wrong."),
     ("cs", "Computer Science", "Systems, networks, data structures and the tooling underneath everything else."),
-    ("field", "Field and Rescue", "Casualty care, environmental injury and navigation — the notes Orb exists to reach offline."),
-    ("orb", "Orb", "The assistant itself: how it is built, what constrains it, and how to fix it."),
+    ("life", "Everyday Life", "Food, money, paperwork, the house and the car — the things that actually come up."),
+    ("health", "Health and Body", "Nutrition, sleep, fitness, and what to do when something is wrong."),
+    ("mind", "Mind and Thinking", "How reasoning fails, how learning works, and how to decide."),
+    ("world", "World and Society", "History, institutions, economics and the planet."),
+    ("sci", "Science and Maths", "The general scientific ground everything else stands on."),
+    ("home", "Homelab and Infrastructure", "Storage, networking and the servers this assistant runs on."),
+    ("make", "Making and Electronics", "3D printing, circuits and the workshop."),
+    ("field", "Field and Outdoors", "Casualty care, environmental injury and navigation."),
+    ("nova", "Nova Itself", "How this assistant is built, how it fails, and how to fix it."),
+    ("code", "Programming", "Languages, testing, debugging and the craft of writing software."),
+    ("ops", "Operations", "Running systems: deployment, reliability, monitoring and recovery."),
 ]
 
 THREAT_MODEL = """---
@@ -224,8 +382,11 @@ def main():
         title, tags = read_meta(p)
         if "moc" in tags:
             continue
-        domain = next((d for d in ("security", "ai", "cs", "field") if d in tags), None)
-        if "orb" in tags:
+        domain = next((d for d in ("security", "ai", "cs", "field", "home", "make",
+                                   "life", "health", "mind", "world", "sci",
+                                   "code", "ops")
+                       if d in tags), None)
+        if "nova" in tags:
             orb.append((title, p.stem))
             continue
         if not domain:
@@ -234,19 +395,19 @@ def main():
 
     made = 0
     for domain, dom_title, dom_desc in DOMAINS:
-        if domain == "orb":
+        if domain == "nova":
             lines = [f"- [[{s}|{t}]]" for t, s in sorted(orb)]
             body = (frontmatter(dom_title, ["moc", "orb"])
                     + f"# {dom_title}\n\n{dom_desc}\n\n" + "\n".join(lines)
                     + "\n\nBack to [[index|Index]].\n")
-            (VAULT / "moc-orb.md").write_text(body, encoding="utf-8")
+            (VAULT / "moc-nova.md").write_text(body, encoding="utf-8")
             made += 1
             continue
 
         topics = buckets.get(domain, {})
         # Ordered as the rules are, so a domain hub reads in a deliberate
         # sequence rather than alphabetically by accident.
-        order = [t for t, _, _ in RULES[domain] if t in topics]
+        order = [t for t, _, _ in RULES.get(domain, []) if t in topics]
         order += [t for t in topics if t not in order]
 
         for topic in order:
@@ -279,7 +440,7 @@ def main():
 
     print(f"  hub notes written: {made} (+ index)")
     for domain, dom_title, _ in DOMAINS:
-        if domain == "orb":
+        if domain == "nova":
             print(f"  {dom_title:24} {len(orb):3} notes")
             continue
         topics = buckets.get(domain, {})

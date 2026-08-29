@@ -104,6 +104,103 @@ TOPICS = {
  "Tick-borne disease","Burn","Sprain","Ordnance Survey National Grid","Mountain rescue",
  "Hyperthermia","Compass","Map reading","Survival skills","Hypoxia (medicine)",
 ],
+"home": [
+ "Virtualization","Hypervisor","Network-attached storage","RAID","ZFS","Btrfs",
+ "Samba (software)","Network File System","Reverse proxy","Load balancing (computing)",
+ "Nginx","Dynamic DNS","Port forwarding","Wake-on-LAN","Power over Ethernet",
+ "Uninterruptible power supply","Systemd","Cron","Rsync","Syslog",
+ "Home automation","MQTT","Zigbee","Raspberry Pi","Single-board computer",
+ "Solid-state drive","Hard disk drive","S.M.A.R.T.","Backup","Incremental backup",
+ "Disaster recovery","Virtual LAN","Wi-Fi","Bluetooth","Network switch","Router (computing)",
+],
+"make": [
+ "3D printing","Fused filament fabrication","Stereolithography","G-code",
+ "Computer-aided design","Polylactic acid","Acrylonitrile butadiene styrene","Nylon",
+ "Soldering","Printed circuit board","Breadboard","Resistor","Capacitor","Inductor",
+ "Diode","Light-emitting diode","Transistor","Operational amplifier","Microcontroller",
+ "Arduino","Field-programmable gate array","Multimeter","Oscilloscope","Ohm's law",
+ "Direct current","Alternating current","Electric battery","Lithium-ion battery",
+ "Pulse-width modulation","Stepper motor","Servomotor","Bearing (mechanical)",
+ "Screw thread","Torque","Welding","Machining","Injection moulding","Laser cutting",
+ "Numerical control","Adhesive",
+],
+"life": [
+ "Cooking","Human nutrition","Food safety","Foodborne illness","Refrigeration",
+ "Fermentation in food processing","Bread","Coffee","Tea","Personal finance",
+ "Compound interest","Interest rate","Inflation","Index fund","Pension","Insurance",
+ "Mortgage loan","Credit score","Income tax","Value-added tax","Budget","Contract",
+ "Consumer protection","Lease","Will and testament","Power of attorney",
+ "Motor oil","Tire","Brake","Internal combustion engine","Electric vehicle","Bicycle",
+ "Plumbing","Electrical wiring","Building insulation","Central heating",
+ "Mold","Laundry","Recycling","Waste management","Gardening","Compost",
+],
+"health": [
+ "Vitamin","Protein (nutrient)","Carbohydrate","Dietary fiber","Sleep","Circadian rhythm",
+ "Insomnia","Exercise","Aerobic exercise","Strength training","Stretching","Physical fitness",
+ "Body mass index","Blood pressure","Cholesterol","Diabetes","Immune system","Vaccine",
+ "Antibiotic","Analgesic","Common cold","Influenza","Headache","Migraine","Allergy",
+ "Asthma","Mental health","Anxiety","Major depressive disorder","Stress (biology)",
+ "Meditation","Mindfulness","Dentistry","Hearing loss","Human eye","Skin","Posture",
+ "Caffeine","Alcohol (drug)","Tobacco smoking",
+],
+"mind": [
+ "Psychology","Cognitive bias","Confirmation bias","Memory","Spaced repetition",
+ "Learning","Motivation","Habit","Procrastination","Attention","Flow (psychology)",
+ "Emotional intelligence","Big Five personality traits","Maslow's hierarchy of needs",
+ "Classical conditioning","Operant conditioning","Cognitive behavioral therapy",
+ "Decision-making","Game theory","Prisoner's dilemma","Logic","Critical thinking",
+ "Fallacy","Occam's razor","Scientific method","Philosophy","Ethics","Stoicism",
+ "Existentialism","Epistemology","Utilitarianism","Free will","Consciousness",
+ "Rhetoric","Negotiation","Time management","Creativity","Intelligence",
+],
+"world": [
+ "Ancient Rome","Ancient Greece","Ancient Egypt","Middle Ages","Renaissance",
+ "Age of Enlightenment","Industrial Revolution","World War I","World War II","Cold War",
+ "Space Race","Globalization","United Nations","European Union","United Kingdom",
+ "Democracy","Constitution","Rule of law","Human rights","Capitalism","Socialism",
+ "Economics","Supply and demand","Gross domestic product","Central bank","Stock market",
+ "Cryptocurrency","Bitcoin","Climate change","Renewable energy","Solar power","Wind power",
+ "Nuclear power","Electrical grid","Agriculture","Public transport","Geography",
+ "Plate tectonics","Ocean","Atmosphere of Earth","Time zone","Calendar","Cartography",
+],
+"sci": [
+ "Physics","Classical mechanics","Newton's laws of motion","Energy","Thermodynamics",
+ "Entropy","Electromagnetism","Light","Optics","Sound","Wave","Quantum mechanics",
+ "Special relativity","General relativity","Gravity","Atom","Periodic table",
+ "Chemical bond","Acid","Chemical reaction","Redox","Organic chemistry","Polymer","Water",
+ "Biology","Cell (biology)","DNA","Gene","Evolution","Natural selection","Photosynthesis",
+ "Bacteria","Virus","Ecosystem","Mathematics","Algebra","Geometry","Calculus","Derivative",
+ "Integral","Probability","Statistics","Normal distribution","Standard deviation",
+ "Correlation","Prime number","Logarithm","Trigonometry","Astronomy","Solar System",
+ "Star","Galaxy","Black hole","Measurement","International System of Units",
+],
+"code": [
+ "Programming language","Python (programming language)","Shell script","Bash (Unix shell)",
+ "JavaScript","C (programming language)","Rust (programming language)","Go (programming language)",
+ "Object-oriented programming","Functional programming","Recursion (computer science)",
+ "Variable (computer science)","Data type","Type system","Pointer (computer programming)",
+ "Memory management","Memory leak","Exception handling","Debugging","Software bug",
+ "Unit testing","Test-driven development","Code refactoring","Software design pattern",
+ "Application programming interface","Library (computing)","Software framework",
+ "Package manager","Integrated development environment","Vim (text editor)","Code review",
+ "Technical debt","Software documentation","Algorithm","Analysis of algorithms",
+ "Parallel computing","Asynchronous I/O","Callback (computer programming)","Serialization",
+ "JSON","XML","YAML","Character encoding","Command-line interface","Environment variable",
+ "Exit status","Standard streams","Pipeline (Unix)","Make (software)","Linker (computing)",
+ "Bytecode","Idempotence","Race condition","Regression testing","Software versioning",
+ "Semantic Versioning","Fail-safe","Defensive programming","Logging (computing)",
+],
+"ops": [
+ "Proxmox Virtual Environment","OS-level virtualization","Cgroups",
+ "File-system permissions","Iptables","Log file","Network monitoring",
+ "System administrator","Configuration management","Infrastructure as code",
+ "Continuous deployment","Rollback (data management)","High availability",
+ "Fault tolerance","Redundancy (engineering)","Single point of failure",
+ "Mean time between failures","Service-level agreement","Capacity planning",
+ "Root cause analysis","Postmortem documentation","Runbook","Chaos engineering",
+ "Blue-green deployment","Canary release","Observability","Telemetry",
+ "Time synchronization","Network Time Protocol","Public key certificate",
+],
 }
 
 HANDWRITTEN = {"Hypothermia","Bleeding","Shock","Heat illness","Dehydration",
@@ -156,6 +253,11 @@ def lede(href, limit=BODY_CHARS):
     return "\n\n".join(paras)
 
 
+def slugify(name):
+    """The one place a note's file name is decided."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60]
+
+
 def short(title):
     return re.sub(r"\s*\(.*?\)\s*$", "", title).strip()
 
@@ -171,17 +273,39 @@ def main():
             name = short(t)
             if name in HANDWRITTEN or name in written:
                 continue
+            # Already generated by an earlier run. Refetching rewrites the
+            # file, changing its mtime for text that has not changed, which
+            # forces a full re-embed and shows the whole vault to Obsidian
+            # as modified.
+            if (MEM / (slugify(name) + ".md")).exists():
+                continue
             href = find_article(t)
             body = lede(href) if href else ""
             if len(body) < 200:
                 missing.append(t)
             else:
-                fname = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60] + ".md"
+                fname = slugify(name) + ".md"
                 written[name] = (fname, tag, t, body)
             if n % 25 == 0:
                 print(f"  ... {n}/{total} ({len(written)} written)", flush=True)
 
-    names = sorted(list(written) + list(HANDWRITTEN), key=len, reverse=True)
+    # Obsidian resolves a wikilink against the FILE NAME, and these files
+    # are slugs while the prose is not. Writing [[operating system]] against
+    # operating-system.md is what left 1308 links in this vault pointing at
+    # nothing. [[slug|Display]] shows the same words and actually resolves.
+    stem_of = {n: meta[0][:-3] for n, meta in written.items()}
+    for p in MEM.glob("*.md"):                 # notes already on disk
+        # Maps of content are NOT link targets. Their titles are concept
+        # names that collide with the real notes, and prose linking to an
+        # index instead of an explanation is a category error.
+        if p.stem.startswith("moc-") or p.stem == "index":
+            continue
+        head = p.read_text(encoding="utf-8", errors="replace")[:400]
+        t = re.search(r"^title:\s*(.+)$", head, re.M)
+        if t:
+            stem_of.setdefault(t.group(1).strip(), p.stem)
+
+    names = sorted(stem_of, key=len, reverse=True)
     for name, (fname, tag, source, body) in written.items():
         linked, used = body, set()
         for other in names:
@@ -190,9 +314,10 @@ def main():
             pat = re.compile(r"(?<!\[)\b(" + re.escape(other) + r")\b(?!\])", re.I)
             m = pat.search(linked)
             if m:
-                linked = linked[:m.start()] + "[[" + m.group(1) + "]]" + linked[m.end():]
+                linked = (linked[:m.start()] + "[[" + stem_of[other] + "|"
+                          + m.group(1) + "]]" + linked[m.end():])
                 used.add(other)
-        see = ", ".join(f"[[{u}]]" for u in sorted(used)[:10])
+        see = ", ".join(f"[[{stem_of[u]}|{u}]]" for u in sorted(used)[:10])
         doc = ("---\n" f"created: {NOW}\n" f"title: {name}\n"
                f"tags: [{tag}, reference]\n" f"source: wikipedia_en_full/{source}\n"
                "---\n\n" f"# {name}\n\n{linked}\n"

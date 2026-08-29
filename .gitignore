@@ -22,3 +22,5 @@ __pycache__/
 *.pyc
 .DS_Store
 fonts/*.woff2
+# SearXNG generates a secret at deploy time; it must not be committed.
+.searxng.env

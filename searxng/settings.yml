@@ -1,0 +1,49 @@
+# SearXNG for Nova. Self-hosted metasearch: no API key, no account, no quota,
+# and no single provider that can retire an endpoint underneath us.
+#
+# JSON is enabled because the router needs machine-readable results; the HTML UI
+# is left on because it is genuinely useful for debugging a bad query by hand.
+use_default_settings: true
+
+general:
+  instance_name: "Nova"
+  # Nothing here should reach the internet describing itself as a public
+  # instance; this is one user on a tailnet.
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+server:
+  # Overridden at runtime from the environment so the secret is not in git.
+  secret_key: "replaced-at-deploy"
+  limiter: false          # single trusted user; the rate limiter only gets in the way
+  image_proxy: false
+
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 12.0
+  pool_connections: 10
+
+engines:
+  # Engines that answer without an API key and do not aggressively block
+  # server-side traffic. Wikipedia is included deliberately even though the
+  # archive is local: it is how we notice the local copy has gone stale.
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: arxiv
+    disabled: false

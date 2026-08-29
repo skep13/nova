@@ -2343,6 +2343,19 @@ const RE_TOPIN    = /^\s*(?:(?:back|way|bearing|distance)\s+to\s+(?:the\s+)?pin|
 // up on, and a vault that files a note on each of them stops being a second
 // brain within a week. Asking is the signal.
 const RE_RESEARCH = /^\s*(?:research|look\s+up|read\s+up\s+on|study\s+up\s+on|(?:make|write|take|create|do)\s+(?:me\s+)?(?:a\s+|some\s+)?notes?\s+(?:on|about)|note\s+(?:on|about))\s+(.{3,200}?)\s*[?.!]*\s*$/i;
+
+// The same thing, but sourced from the live web instead of the archive. Its own
+// verb rather than a flag, because the difference matters to the user: one
+// answer is from a dated snapshot they carry, the other is from pages a
+// stranger wrote this morning, and the note records which.
+// Self-diagnosis. Answered from /health, not by the model: reading JSON is not
+// something to ask a 3B to do, and a status report that is sometimes invented
+// is worse than none. The model is only involved if you then ask WHY, at which
+// point the vault's own notes about this system are what it retrieves.
+const RE_STATUS = /^\s*(?:(?:system\s+)?status|self[\s-]?check|diagnos(?:e|tics)|health(?:\s+check)?|what(?:'?s| is)\s+wrong|are\s+you\s+(?:ok|okay|alright|working)|is\s+everything\s+(?:ok|okay|working))\s*[?.!]*\s*$/i;
+
+const RE_WEBRESEARCH = /^\s*(?:(?:search|check|look\s+(?:it\s+)?up|research|read\s+up)\s+(?:on\s+)?(?:the\s+)?(?:web|internet|online)\s+(?:for\s+|about\s+|on\s+)?|(?:what(?:'?s| is)\s+the\s+latest\s+(?:on|about|with)\s+)|(?:google|search)\s+)(.{3,200}?)\s*[?.!]*\s*$/i;
+const RE_WEBSUFFIX  = /^\s*(.{3,200}?)\s+(?:on\s+the\s+web|online|on\s+the\s+internet)\s*[?.!]*\s*$/i;
 const GREETINGS = [
   'Hello. What are we looking at?',
   'Still here. What do you need?',
@@ -2890,6 +2903,63 @@ function stripMarkdown(s){
 }
 
 /* ============ chat ============ */
+/* ============ self-diagnosis ============
+   Reads /health and reports it plainly. Deterministic on purpose — every fact
+   here comes from a real probe of a real service, so none of it can be
+   confabulated, and the one thing you need from a status report is to be able
+   to believe it.
+
+   Names the recovery note when something is wrong, because knowing whisper is
+   down is only half of what you wanted. */
+const HEALTH_LABEL = {
+  llama: 'local model', piper: 'speech out', whisper: 'speech in',
+  kiwix: 'offline wikipedia', webdav: 'vault sync', vault: 'notes on disk',
+  embeddings: 'semantic search', backup: 'nightly backup',
+};
+
+async function doStatus(text){
+  bubble('user', text);
+  input.value = '';
+  setState('thinking', 'checking');
+  try {
+    const r = await fetch('/health', { cache:'no-store' });
+    const h = await r.json();
+    const c = h.checks || {};
+    const bad = (h.failing || []);
+
+    const lines = [];
+    if (!bad.length){
+      lines.push('Everything is working.');
+    } else {
+      const crit = h.critical || [];
+      lines.push(crit.length
+        ? 'Not working: ' + crit.map(k => HEALTH_LABEL[k] || k).join(', ') + '.'
+        : 'Degraded but usable.');
+      for (const k of bad){
+        const v = c[k] || {};
+        lines.push('- ' + (HEALTH_LABEL[k] || k) + ': ' + (v.error || 'not responding'));
+      }
+      lines.push('Ask "why is ' + (HEALTH_LABEL[bad[0]] || bad[0]) + ' down" for the fix.');
+    }
+
+    // Facts worth stating whether or not anything is broken.
+    const v = c.vault || {}, e = c.embeddings || {}, b = c.backup || {};
+    if (v.files) lines.push(v.files + ' notes, ' + (v.notes_indexed || 0) + ' searchable.');
+    if (e.vectors != null) lines.push(e.vectors + ' of those embedded for meaning-based search.');
+    if (b.age_hours != null) lines.push('Last backup ' + b.age_hours + ' hours ago, ' + (b.notes || '?') + ' notes in it.');
+    const model = agentChip.textContent || '';
+    if (model) lines.push('Answering with ' + model.toLowerCase() + '.');
+
+    const msg = lines.join('\n');
+    bubble('bot', msg);
+    speak(lines.slice(0, 3).join(' '));    // spoken summary, not the whole readout
+  } catch (err){
+    bubble('err', 'Could not reach the health endpoint: ' + err.message);
+  } finally {
+    setState('idle', idleHint());
+  }
+}
+
 /* ============ research ============
    Ask a question, get an answer, and get a note filed in the vault.
 
@@ -2903,20 +2973,20 @@ function stripMarkdown(s){
    Streams like a normal reply, then a trailing event names the note that was
    written. Nothing is spoken about the filing: on a wrist the answer is the
    point, and the note is a side effect worth seeing but not hearing. */
-async function doResearch(text, topic){
+async function doResearch(text, topic, useWeb){
   busy = true;
   bubble('user', text);
   input.value = '';
   const el = bubble('bot', '');
   el.classList.add('pending');
-  setState('thinking', 'reading up');
+  setState('thinking', useWeb ? 'searching the web' : 'reading up');
 
   let full = '', spoken = 0, queued = false, filed = null;
 
   try {
     const res = await fetch('/research', {
       method:'POST', headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ q: topic, agent: agentName })
+      body: JSON.stringify({ q: topic, agent: agentName, web: !!useWeb })
     });
     if (!res.ok){
       // The server explains itself on 404 — "nothing found for that in the
@@ -3020,9 +3090,22 @@ async function send(text){
   // "research X" takes its own path: the server searches the vault and the
   // offline archive before it generates, and files what comes back. Skills win
   // where they overlap, so "look up 12 * 40" stays arithmetic.
+  if (!skilled && RE_STATUS.test(text)){
+    await doStatus(text);
+    return;
+  }
+
+  // Web first: "look up the web for X" also matches the plain research verb,
+  // and the more specific reading is the one the user typed.
+  const wantsWeb = !skilled && (text.match(RE_WEBRESEARCH) || text.match(RE_WEBSUFFIX));
+  if (wantsWeb){
+    await doResearch(text, wantsWeb[1].trim(), true);
+    return;
+  }
+
   const wantsResearch = !skilled && text.match(RE_RESEARCH);
   if (wantsResearch){
-    await doResearch(text, wantsResearch[1].trim());
+    await doResearch(text, wantsResearch[1].trim(), false);
     return;
   }
 

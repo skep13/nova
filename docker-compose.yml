@@ -69,6 +69,33 @@ services:
           # afford to be slow; generation cannot.
           memory: 400m
 
+  # Web search. The offline Wikipedia is a snapshot and cannot know anything
+  # that happened after it was made — asked about a model released last month it
+  # is not wrong, it is silent. This is the path for everything the archive
+  # cannot contain.
+  #
+  # SearXNG rather than a search API: no key, no account, no quota, and no
+  # single provider that can retire an endpoint underneath us. It aggregates
+  # engines that answer without credentials.
+  #
+  # Set NOVA_WEB=0 to turn the whole capability off. Everything already in the
+  # vault keeps working — this only ever ADDS sources.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: orb-searxng
+    restart: unless-stopped
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+      # Generated at deploy time rather than committed. SearXNG refuses to
+      # start on the default value, which is the correct behaviour.
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-change-me-at-deploy}
+    deploy:
+      resources:
+        limits:
+          memory: 320m
+
   piper:
     build:
       context: .
