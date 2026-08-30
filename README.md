@@ -60,13 +60,25 @@ the LXC will not help.
 | Container | Job | RAM limit |
 |---|---|---|
 | `llama` | Qwen2.5-3B-Instruct Q4_K_M, OpenAI-compatible API, 8k context | 3500m |
-| `remote` | agent router, vault search, `/research`, `/health`, geo | 256m |
+| `remote` | agent router, vault search, research, health, maintenance, geo | 256m |
 | `kiwix` | full English Wikipedia (50 GB) + mdwiki-medicine (2.2 GB) | 1024m |
 | `piper` | Piper neural TTS, `en_US-lessac-high` | 640m |
 | `embed` | nomic-embed-text-v1.5, semantic vault search | 400m |
 | `whisper` | whisper.cpp `base.en`, server-side speech to text | 500m |
+| `searxng` | self-hosted metasearch, no API key | 320m |
+| `sandbox` | runs model-written code, internal network only | 256m |
 | `webdav` | hacdias/webdav over the vault, for Obsidian | 96m |
 | `web` | nginx: the page, and one origin for all of the above | 64m |
+
+Plus one process outside every container: `nova-maintain.py`, a systemd service
+in the LXC. It exists precisely so the Docker socket never has to be mounted
+into something the browser can reach.
+
+`lemonade` is declared behind a `trial` compose profile and does not start.
+Measured and not adopted: 7.03 tok/s using the iGPU against llama.cpp's 8.37 on
+CPU, because its engine IS llama.cpp and the HD 520 shares the same memory bus
+that was already the constraint. Kept with the numbers in the file so the
+question does not get re-asked from scratch.
 
 ## Skills: answered exactly, not generated
 
@@ -110,8 +122,8 @@ reliably than descriptions buried in context.
 ## Memory and your own notes
 
 Everything lives as Markdown in `/opt/orb/mem/` inside LXC 101 — no database.
-It is a real Obsidian vault: 343 notes, 28 maps of content, zero broken
-wikilinks, synced to phone, iPad and laptop over WebDAV at `/dav/Orb/`.
+It is a real Obsidian vault: 1197 notes across 19 domains, 104 maps of
+content, zero broken wikilinks, synced to phone, iPad and laptop over WebDAV at `/dav/Orb/`.
 
 nginx's own dav module serves the page's short facts, but it **cannot** serve
 Obsidian — it does PUT and DELETE and returns 405 to PROPFIND, which is how a
@@ -279,7 +291,122 @@ Backups live on the same physical disk as the thing they back up. Set
 `NOVA_BACKUP_OFFBOX` to an scp target to get a copy off the box; an unreachable
 target is logged, never fatal, because a sleeping laptop must not fail a backup.
 
-Restore is `tar xzf` — verified end to end: 343 notes in, 343 notes out.
+Restore is `tar xzf` — verified end to end: 1197 notes in, 1197 notes out.
+
+## Web: what the archive cannot know
+
+The offline Wikipedia is a snapshot. Asked about something released after it was
+built it is not wrong, it is silent — and silence is the failure you notice last.
+
+Say **"search the web for X"**, **"what's the latest on X"**, or **"X online"**
+and Nova searches, reads the pages, writes the answer up and files it as a note
+with its source URLs, tagged `web` so a live-sourced note is distinguishable
+from an archive one.
+
+Search is a self-hosted **SearXNG** container: no API key, no account, no quota,
+and no single provider that can retire an endpoint underneath us. Two engines
+return CAPTCHAs to server-side traffic; they are left failing rather than worked
+around, and the rest still answer, which is the whole argument for metasearch.
+
+Three properties matter more than the feature:
+
+- **Fetched pages are data, never instructions.** A page is written by a stranger
+  and may contain text addressed to a model. The prompt names it as source
+  material and tells the model to describe any instructions rather than follow
+  them.
+- **The fetcher cannot reach the LAN.** Every host is resolved and checked
+  against private, loopback, link-local and reserved ranges before any request,
+  and again after redirects. Sibling containers, `169.254.169.254` and `file://`
+  are all refused — ten cases in the test suite.
+- **`NOVA_WEB=0` disables it entirely** and the vault keeps working, because this
+  only ever adds sources.
+
+`build_web_notes.py` runs a batch: 35 notes on current tooling in 28 minutes.
+
+## Code: written, run, and fixed against the error
+
+This is the one place the system exceeds its model. Everywhere else an answer is
+only as good as what came out; here it is checked.
+
+`POST /code` writes a program, runs it, reads the traceback and fixes it, up to
+three attempts. `POST /run` executes a snippet with no model involved.
+
+**The isolation is in the container, not the Python.** The thing being executed
+is written by a 3B and must be assumed wrong in ways nobody predicted, so every
+limit is independent: an internal-only network with no gateway, a read-only root
+filesystem, a 64 MB tmpfs as the only writable space, no volumes so the vault
+and keys are not mounted at all, all capabilities dropped, no-new-privileges, a
+pids cap, and a wall-clock timeout with an address-space limit applied in the
+child before exec.
+
+Verified from inside the sandbox rather than asserted: `1.1.1.1` and `pypi.org`
+unreachable, `llama` and `webdav` and the LAN address unreachable, `/` read-only,
+`/run/keys` and `/mem` absent, and `while True: pass` returning "timed out after
+10s" instead of hanging.
+
+**Exit code is not correctness.** Asked for the mean of 91, 84 and 77, the local
+model produced a program that crashed, read the traceback, fixed it, and printed
+`ada, 0.0` — clean exit, wrong answer, nothing able to tell. The prompt now asks
+for a short `assert` wherever the expected result is knowable, which turns a
+wrong answer into a traceback: the one failure this loop is good at. That change
+immediately produced an honest failure where there had been a false success.
+
+## Maintenance: request, never execute
+
+Nova can restart its own services and rebuild its own indexes. It cannot run
+commands, and the difference is the design.
+
+The obvious implementation is to mount `docker.sock` into the router. That would
+also make any bug in a browser-reachable service equivalent to root, because
+control of the daemon is control of the host. So the router has no socket: it
+writes a request to a file, and `nova-maintain.py` — a systemd service in the
+LXC, outside every container — decides whether that request is on the list.
+
+Allowed: `restart <service>`, `reload-web`, `rebuild-hubs`, `repair-links`,
+`reindex`. No path, argument or string from a request ever reaches a shell.
+`rm -rf /` and a service named `; reboot` are both refused, and both are tested.
+
+Backups are deliberately **not** on the list: that script lives on the Proxmox
+host and reaches in with `pct`, and giving the container a route to the
+hypervisor would undo the boundary. `/health` reports backup age instead, which
+is the part that needed to be visible.
+
+## Nova knows its own source
+
+`build_source_notes.py` puts the code in the vault — one note per top-level
+definition, nginx location or compose service, not one per file. `remote_proxy.py`
+is two thousand lines; as a single note the excerpt lands wherever matched first,
+usually the wrong function. Split this way the match **is** the unit.
+
+Identifiers are indexed whole as well as split, so `search_vault`,
+`gather_sources` and `demoteMode` are each findable by their exact name. Stripping
+underscores turned `search_vault` into two common words and lost it entirely.
+
+Alongside them sit twelve hand-written notes on architecture, endpoints, agents,
+retrieval, backups, health, voice, deployment and recovery procedures — including
+the failures this system has actually had, because the second occurrence is
+easier to spot than the first.
+
+Ask **"status"** or **"what's wrong"** and it reports what actually probed.
+Answered from `/health` deterministically, never by the model: reading JSON is
+not something to ask a 3B, and a status report that is sometimes invented is
+worse than none.
+
+## Tests
+
+    python3 test_nova.py            # 40 checks
+    python3 test_nova.py --quick    # skip the slow generative ones
+
+They assert behaviour, not status codes. A 200 from `/recall` proves the router
+is up; it does not prove the right note came back. Exit code is the failure
+count, so it can gate a deploy.
+
+It exists because several failures here were invisible until someone reached for
+the thing: whisper crash-looping while `docker ps` said Up, a nightly backup that
+had not run for a week, an endpoint 405ing because nginx was never told about it,
+a microphone that stopped listening a second after it started. Every one was
+findable in seconds by asking a real question. None was found that way, because
+nothing asked.
 
 ## Grounding: offline Wikipedia
 
