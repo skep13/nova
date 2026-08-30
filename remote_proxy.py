@@ -2397,6 +2397,275 @@ async def ask(request):
     return web.json_response(out)
 
 
+# --- writing to the vault ---------------------------------------------------
+#
+# Nova told the user over Telegram that she had created an Obsidian note. She
+# had not, and could not: nothing in this system could write one. A rule
+# against claiming it was the immediate fix; this is the real one.
+#
+# The router does the writing, not the bridge. The bridge relays messages from
+# the open internet and is deliberately given no vault mount at all — a
+# property the test suite asserts — so it asks for a note the same way it asks
+# for an answer, and the filesystem stays on this side of the wall.
+#
+# Everything about the filename is decided HERE and none of it comes from the
+# caller. A title is a title; it is never a path. slug() reduces to [a-z0-9-],
+# so "../../etc/passwd" becomes "etc-passwd", and the resolved path is checked
+# to sit inside the vault anyway — one defence that depends on a regex being
+# perfect is not a defence.
+NOTE_TITLE_MAX = 120
+NOTE_BODY_MAX = 8000
+
+
+def note_path(title):
+    """Vault path for a title, or None if it does not reduce to a usable name."""
+    stem = slug(title, 60)
+    if not stem or stem == "exchange":
+        return None
+    path = (VAULT_DIR / f"{stem}.md").resolve()
+    # Belt and braces. slug() should make traversal impossible, so if this ever
+    # fires then that assumption has broken and refusing is the only safe move.
+    if path.parent != VAULT_DIR.resolve():
+        return None
+    return path
+
+
+async def note_write(request):
+    """Create or append a note. Returns exactly what was written.
+
+    The body is echoed back so the caller can show the user the real contents.
+    A 3B extracting a note from a sentence embellishes — asked for a list with
+    one item it produced three, inventing two — so the user has to see what
+    actually landed rather than a claim that something did.
+    """
+    return await _note_write_dict(await request.json())
+
+
+async def note_list(request):
+    """Which notes match this? Answers "is that in my notes?" from the disk.
+
+    Deterministic on purpose. Asked whether a note existed, the model gave
+    "yes", "no" and a vague deflection across three samples of one question,
+    because it had no way to look and nothing stopping it guessing.
+
+    Reads the DIRECTORY, not the loaded vault. load_vault() drops anything
+    under FACT_MAX as a fact rather than a document, so a short note — exactly
+    what "make me a note with one item on it" produces — is invisible to
+    retrieval while sitting plainly on disk. Answering "no" about a file the
+    user can see in Obsidian is the same failure as claiming one exists.
+    """
+    q = (request.query.get("q") or "").strip().lower()
+    words = [w for w in re.findall(r"[a-z0-9]+", q) if w not in _STOP]
+    if not words:
+        return web.json_response({"hits": [], "count": 0})
+
+    hits = []
+    for p in sorted(VAULT_DIR.glob("*.md")):
+        head = p.read_text(encoding="utf-8", errors="replace")[:400]
+        m = re.search(r"^title:\s*(.+)$", head, re.M)
+        title = (m.group(1).strip() if m else p.stem.replace("-", " "))
+        # Matched against the filename too, so a note found by its slug still
+        # counts — the two differ often enough to matter.
+        hay = (title + " " + p.stem.replace("-", " ")).lower()
+        if all(w in hay for w in words):
+            hits.append({"title": title, "file": p.name})
+    hits.sort(key=lambda h: len(h["title"]))
+    return web.json_response({"hits": hits[:20], "count": len(hits)})
+
+
+# Extraction, not decision.
+#
+# Asked to DECIDE whether to use a tool, a 3B is unreliable — measured at 2/5
+# here, which is why every other skill in this system is triggered
+# deterministically before the model is reached. But asked to EXTRACT a title
+# and a body into a fixed shape, with the shape stated as a rule, the same
+# model scored 15/15 across five phrasings. Rules land; judgement does not. So
+# a cheap pattern decides THAT a note is wanted and the model only works out
+# WHAT it says.
+#
+# The last line matters. Given "a list with the first item being X" it happily
+# produced three items, inventing two, and they would have gone into the user's
+# vault as though they had asked for them.
+NOTE_EXTRACT = (
+    "You extract note requests. If the user is asking to create, save, add or "
+    "write a note, reply with EXACTLY one line and nothing else:\n"
+    "NOTE|<title>|<body>\n"
+    "Use a leading '- ' for list items and \\n between them.\n"
+    "If the user is NOT asking to save a note, reply with exactly: NONE\n"
+    "Use ONLY what the user actually said. Never invent extra items, examples "
+    "or filler. If they gave one item, the body has one item.\n"
+    "If they are adding something to a note they already have, the title is "
+    "that existing note's name and the body is only the new item.\n"
+    "Output the line once. Never repeat it."
+)
+
+
+async def note_from_text(request):
+    """Turn a sentence into a note. Extract with the model, write with code."""
+    payload = await request.json()
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "no text given"}, status=400)
+
+    # Fast path, no model. "add X to my Y note" is a fixed grammar, and the
+    # model was bad at exactly this: "add check the backup ran to my telegram
+    # trial note" came back titled "Backup Check", a brand new note holding the
+    # line that belonged in an existing one. It reads the front of the sentence
+    # as the subject and loses the destination at the end.
+    #
+    # A regex reads it correctly every time and costs nothing. Same division as
+    # everywhere else here — structure is parsed, meaning is modelled.
+    m = _APPEND_TO.match(text)
+    if m:
+        item, target = m.group(1).strip(), m.group(2).strip()
+        existing = resolve_note_title(target) or target
+        path = note_path(existing)
+        if path:
+            return await _note_write_dict({"title": existing,
+                                           "body": "- " + item,
+                                           "append": path.exists()})
+
+    messages = [{"role": "system", "content": NOTE_EXTRACT},
+                {"role": "user", "content": text}]
+    async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None, sock_read=300)) as s:
+        # Low temperature: this is a parsing job with one right answer, and
+        # sampling variety is nothing but a chance to deviate from the format.
+        raw, _ = await complete(s, BY_NAME["local"], messages, 200, temperature=0.1)
+
+    raw = (raw or "").strip()
+    # Found rather than anchored. The format itself came back right every time
+    # in testing, but once with a "- " bullet in front of it — the model had
+    # been told to use "- " for list items and applied it to the whole line.
+    # Refusing a correct extraction over a stray prefix is brittleness, not
+    # strictness; the shape below is still checked exactly.
+    start = raw.find("NOTE|")
+    if start < 0:
+        return web.json_response({"note": False, "raw": raw[:120]})
+
+    parts = raw[start:].split("\n", 1)[0].split("|", 2)
+    if len(parts) < 3:
+        return web.json_response({"note": False, "raw": raw[:120]})
+    title, body = parts[1].strip(), parts[2].strip()
+    # The model writes the two-character sequence backslash-n; turn it into
+    # real line breaks so the note is a list rather than one long line.
+    body = body.replace("\\n", "\n").strip()
+
+    # Then cut at any second NOTE| line. Told to emit one line, it sometimes
+    # emits three — the same extraction repeated, with the repeats arriving as
+    # literal backslash-n inside the body and so surviving the split above.
+    # Without this the repetition is written into the user's vault verbatim,
+    # which is the one outcome worse than not writing the note at all.
+    body = re.split(r"\n?-?\s*NOTE\|", body)[0].strip()
+    if not title or not body:
+        return web.json_response({"note": False, "raw": raw[:160]})
+
+    path = note_path(title)
+    if not path:
+        return web.json_response({"error": "that title has no usable filename"},
+                                 status=400)
+
+    # Appends when it already exists rather than refusing. Over a chat channel
+    # "add X to my shopping note" is the common case, and a 409 the user has to
+    # understand and retry is a worse answer than doing the obvious thing.
+    # "add X to my telegram trial note" extracted the title "my telegram
+    # trial", which is not a filename anyone has, so it made a second note
+    # beside the first. From a chat channel that is the common phrasing and the
+    # result is a vault slowly filling with near-duplicates, each holding one
+    # line of what should have been one list.
+    #
+    # Only the filler words are forgiven — a leading my/the/our, a trailing
+    # note/list — and the match must be exact after that. Anything fuzzier
+    # risks appending to a note the user did not mean, and writing into the
+    # wrong note is worse than writing a new one.
+    existing = resolve_note_title(title)
+    if existing:
+        title, path = existing, note_path(existing)
+
+    return await _note_write_dict({"title": title, "body": body,
+                                   "append": path.exists()})
+
+
+# "add <item> to my <note> note/list" — the destination is at the END, which is
+# where the model stopped reading.
+_APPEND_TO = re.compile(
+    r"^\s*(?:can you\s+|please\s+)*(?:add|put|append|stick|jot)\s+(.+?)\s+"
+    r"(?:to|onto|in|into|on)\s+(?:my|the|that)\s+(.+?)\s*(?:note|list)\s*[.!]?\s*$",
+    re.I)
+
+_TITLE_FILLER_HEAD = re.compile(r"^(my|the|our|a)\s+", re.I)
+_TITLE_FILLER_TAIL = re.compile(r"\s+(note|notes|list)$", re.I)
+
+
+def _bare(title):
+    t = _TITLE_FILLER_HEAD.sub("", (title or "").strip())
+    return slug(_TITLE_FILLER_TAIL.sub("", t).strip(), 60)
+
+
+def resolve_note_title(title):
+    """An existing note's real title, if this is plainly the same note."""
+    want = _bare(title)
+    if not want:
+        return None
+    for p in VAULT_DIR.glob("*.md"):
+        head = p.read_text(encoding="utf-8", errors="replace")[:400]
+        m = re.search(r"^title:\s*(.+)$", head, re.M)
+        have = m.group(1).strip() if m else p.stem.replace("-", " ")
+        if _bare(have) == want:
+            return have
+    return None
+
+
+async def _note_write_dict(payload):
+    """Write a note from a plain dict.
+
+    Separated from the handler so both /note and /note/from-text share one
+    implementation. Two copies of the sanitising would eventually become one
+    sanitised path and one that was not.
+    """
+    title = (payload.get("title") or "").strip()[:NOTE_TITLE_MAX]
+    body = (payload.get("body") or "").strip()[:NOTE_BODY_MAX]
+    append = bool(payload.get("append"))
+
+    if not title:
+        return web.json_response({"error": "a note needs a title"}, status=400)
+    path = note_path(title)
+    if not path:
+        return web.json_response({"error": "that title has no usable filename"},
+                                 status=400)
+
+    existed = path.exists()
+    if existed and append:
+        old = path.read_text(encoding="utf-8", errors="replace").rstrip()
+        doc = old + "\n" + body + "\n"
+        action = "appended"
+    elif existed:
+        return web.json_response(
+            {"error": "a note with that title already exists",
+             "file": path.name, "hint": "send append=true to add to it"},
+            status=409)
+    else:
+        doc = ("---\n"
+               f"created: {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+               f"title: {title}\n"
+               "tags: [nova, asked-for]\n"
+               "---\n\n"
+               f"# {title}\n\n{body}\n")
+        action = "created"
+
+    try:
+        VAULT_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(doc, encoding="utf-8")
+    except Exception as exc:
+        return web.json_response({"error": f"could not write: {type(exc).__name__}"},
+                                 status=500)
+
+    global _vault_stamp
+    _vault_stamp = -1.0
+    return web.json_response({"ok": True, "note": True, "action": action,
+                              "file": path.name, "title": title, "body": body})
+
+
 async def code(request):
     payload = await request.json()
     task = (payload.get("q") or "").strip()
@@ -2489,6 +2758,9 @@ app.add_routes([
     web.post("/maintain", maintain),
     web.get("/maintain", maintain_list),
     web.post("/ask", ask),
+    web.post("/note", note_write),
+    web.get("/notes", note_list),
+    web.post("/note/from-text", note_from_text),
     web.post("/code", code),
     web.post("/run", run_code),
 ])

@@ -37,6 +37,7 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -48,6 +49,26 @@ ASK_URL = os.environ.get("NOVA_ASK_URL", "http://remote:5003/ask")
 HEALTH_URL = os.environ.get("NOVA_HEALTH_URL", "http://remote:5003/health")
 STT_URL = os.environ.get("NOVA_STT_URL", "http://whisper:8080/inference")
 TTS_URL = os.environ.get("NOVA_TTS_URL", "http://piper:5000/synthesize")
+# The vault is reached through the router, never mounted here. This process
+# relays messages from the open internet; giving it the filesystem as well
+# would put the note archive one bug away from the outside.
+NOTES_URL = os.environ.get("NOVA_NOTES_URL", "http://remote:5003/notes")
+NOTE_FROM_TEXT_URL = os.environ.get("NOVA_NOTE_URL",
+                                    "http://remote:5003/note/from-text")
+RESEARCH_URL = os.environ.get("NOVA_RESEARCH_URL", "http://remote:5003/research")
+
+HELP = (
+    "Ask me anything and I'll answer from your vault or what I know.\n\n"
+    "status - how I am, checked rather than guessed\n"
+    "weather - current conditions where you are\n"
+    "set location <place> - where that is, and where the morning brief is for\n"
+    "research <topic> - the vault, the offline encyclopedia, then the web\n"
+    "make a note called X saying Y - writes it into Obsidian\n"
+    "add Y to my X note - appends to one that exists\n"
+    "is X in my notes - checked against the actual files\n"
+    "reset - forget this conversation\n\n"
+    "Voice notes work. Send one and you get one back."
+)
 KEY_FILE = pathlib.Path(os.environ.get("TG_KEY", "/run/keys/telegram.key"))
 STATE_FILE = pathlib.Path(os.environ.get("BRIDGE_STATE", "/logs/bridge-state.json"))
 
@@ -281,6 +302,202 @@ async def send_voice(session, chat, text):
             return
 
 
+# --- weather, and the morning brief -----------------------------------------
+#
+# Asked for "a brief every morning at 730 on local weather and temperature",
+# Nova said to go and use a weather app. It was the first thing written into
+# the upgrade list. This is it.
+#
+# Open-Meteo for both geocoding and forecast: free, no API key, no account, and
+# no request signing — which is the entire reason, because the standing rule
+# here is that nothing costs money and nothing needs a key that could expire
+# and take a feature down silently.
+#
+# The location is not hardcoded. The only coordinates on this box are test
+# fixtures — Tower Bridge, Scafell Pike — so the user sets theirs once with
+# "set location <place>" and it persists.
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+BRIEF_AT = os.environ.get("NOVA_BRIEF_AT", "07:30")
+# ISO-3166 alpha-2, searched before the rest of the world. Empty for no
+# preference. This is a personal assistant with one user, and "Boston"
+# meaning Lincolnshire rather than Massachusetts is the whole point.
+HOME_COUNTRY = os.environ.get("NOVA_COUNTRY", "GB").strip().upper()
+
+# WMO weather codes. Only the groups that read differently to a person; the
+# exact code is no use in a sentence.
+_WMO = [
+    (0, 0, "clear"), (1, 1, "mostly clear"), (2, 2, "partly cloudy"),
+    (3, 3, "overcast"), (45, 48, "foggy"), (51, 57, "drizzle"),
+    (61, 65, "rain"), (66, 67, "freezing rain"), (71, 77, "snow"),
+    (80, 82, "rain showers"), (85, 86, "snow showers"),
+    (95, 99, "thunderstorms"),
+]
+
+
+def describe(code):
+    for lo, hi, word in _WMO:
+        if lo <= code <= hi:
+            return word
+    return "unsettled"
+
+
+async def geocode(session, place):
+    """A place name to coordinates, or None.
+
+    Retries on the part before the first comma. Open-Meteo matches a single
+    place name and returns nothing at all for "Keswick, Cumbria" — which is how
+    a person writes it, and precisely when they are disambiguating.
+
+    The qualifier is then used rather than discarded. Dropping it and taking
+    the first global match sent the forecast to Keswick, Iowa: the county was
+    the one piece of information that said which Keswick, and the retry threw
+    it away. So the retry asks for ten and prefers one whose region or country
+    contains the words that were dropped.
+    """
+    head, _, qualifier = place.partition(",")
+    qualifier = qualifier.strip().lower()
+
+    # Home country first, then the world.
+    #
+    # Open-Meteo ranks by population, which is overwhelmingly American: asking
+    # for "Boston" returns Massachusetts, New York, Georgia, Kentucky, Indiana
+    # and Virginia before Lincolnshire appears at all, so filtering the top ten
+    # for the county cannot rescue it. Scoping the search fixes it at source.
+    #
+    # The fallback to an unscoped search is what keeps this a preference rather
+    # than a restriction — "Reykjavik" still resolves.
+    async def search(name, count, country=None):
+        params = {"name": name, "count": count, "language": "en",
+                  "format": "json"}
+        if country:
+            params["countryCode"] = country
+        try:
+            async with session.get(GEOCODE_URL, params=params) as r:
+                return (await r.json()).get("results") or []
+        except Exception:
+            return None
+
+    async def search_local_first(name, count):
+        if HOME_COUNTRY:
+            near = await search(name, count, HOME_COUNTRY)
+            if near:
+                return near
+        return await search(name, count)
+
+    if qualifier:
+        # Always the wider search when a qualifier was given, never the comma
+        # string. Open-Meteo returns nothing for "Keswick, Cumbria" but DOES
+        # return something for "Boston, Lincolnshire" — Boston, Massachusetts.
+        # A confident wrong answer is the worse of the two failures, so the
+        # qualifier decides whenever there is one.
+        wider = await search_local_first(head.strip(), 10)
+        if not wider:
+            return None
+
+        def matches(c):
+            where = " ".join(str(c.get(k) or "") for k in
+                             ("admin1", "admin2", "admin3", "country")).lower()
+            return any(w in where for w in qualifier.split() if len(w) > 2)
+
+        res = [c for c in wider if matches(c)] or wider[:1]
+    else:
+        res = await search_local_first(place, 1)
+    if not res:
+        return None
+    top = res[0]
+    label = ", ".join(x for x in (top.get("name"), top.get("admin1"),
+                                  top.get("country")) if x)
+    return {"lat": top["latitude"], "lon": top["longitude"], "label": label}
+
+
+async def weather_line(session, brief=False):
+    """One or two sentences of weather, or a note that nowhere is set."""
+    loc = load_state().get("location")
+    if not loc:
+        # A town, not a postcode: Open-Meteo's geocoder indexes settlements and
+        # returns nothing for a UK postcode, so asking for one would be asking
+        # for the input most likely to fail.
+        return "I don't know where you are. Say: set location <town>."
+    try:
+        async with session.get(FORECAST_URL, params={
+                "latitude": loc["lat"], "longitude": loc["lon"],
+                "current": "temperature_2m,apparent_temperature,weather_code",
+                "daily": "temperature_2m_max,temperature_2m_min,"
+                         "precipitation_probability_max,weather_code",
+                "forecast_days": 1, "timezone": "auto"}) as r:
+            d = await r.json()
+    except Exception as exc:
+        return f"I couldn't reach the forecast ({type(exc).__name__})."
+
+    cur, day = d.get("current") or {}, d.get("daily") or {}
+    now_c = cur.get("temperature_2m")
+    feels = cur.get("apparent_temperature")
+    hi = (day.get("temperature_2m_max") or [None])[0]
+    lo = (day.get("temperature_2m_min") or [None])[0]
+    wet = (day.get("precipitation_probability_max") or [None])[0]
+    sky = describe((day.get("weather_code") or [cur.get("weather_code", 0)])[0])
+
+    bits = [f"{loc['label']}: {now_c:.0f} degrees" if now_c is not None
+            else f"{loc['label']}:"]
+    # Only when it disagrees with the real temperature by enough to matter —
+    # "3 degrees, feels like 3" is noise.
+    if feels is not None and now_c is not None and abs(feels - now_c) >= 2:
+        bits.append(f"feels like {feels:.0f}")
+    if hi is not None and lo is not None:
+        bits.append(f"{lo:.0f} to {hi:.0f} today, {sky}")
+    if wet is not None:
+        bits.append(f"{wet:.0f}% chance of rain")
+    line = ", ".join(bits) + "."
+    return ("Morning. " + line) if brief else line
+
+
+def _plus_minutes(hhmm, minutes):
+    """"07:30" plus 30 -> "08:00". Clamped, not wrapped: a window that crosses
+    midnight would compare wrongly as a string, and 23:59 is a fine ceiling."""
+    try:
+        h, m = (int(x) for x in hhmm.split(":"))
+    except Exception:
+        return "23:59"
+    total = min(h * 60 + m + minutes, 23 * 60 + 59)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+async def watch_brief(session):
+    """Send the morning brief once a day, at the configured local time.
+
+    Checks the clock rather than sleeping until the target, so a restart at
+    07:29 does not lose the day's brief and a restart at 07:31 does not fire a
+    second one — the date it last sent is persisted, and that is what decides.
+    """
+    while True:
+        try:
+            state = load_state()
+            today = time.strftime("%Y-%m-%d")
+            # A WINDOW, not "past the time". The first version asked whether
+            # the clock had gone beyond 07:30, which is true for the rest of
+            # the day — so restarting at half two in the afternoon sent a
+            # "Morning." brief. Thirty minutes is long enough to survive a
+            # restart across the target and short enough that a late one is
+            # never a surprise.
+            due = BRIEF_AT <= time.strftime("%H:%M") <= _plus_minutes(BRIEF_AT, 30)
+            # Nowhere set means nothing worth saying. The brief would be a
+            # daily reminder that it does not know where you are.
+            if (due and state.get("brief_sent") != today and allowed()
+                    and state.get("location")):
+                line = await weather_line(session, brief=True)
+                _, health = await health_line(session)
+                for chat in sorted(allowed()):
+                    await send(session, chat, line + "\n\n" + health)
+                state = load_state()          # re-read: watch_health also writes
+                state["brief_sent"] = today
+                save_state(state)
+                log(f"morning brief sent to {len(allowed())} chat(s)")
+        except Exception as exc:
+            log(f"brief failed: {type(exc).__name__}: {exc}")
+        await asyncio.sleep(60)
+
+
 # --- health -----------------------------------------------------------------
 
 async def health_line(session):
@@ -337,18 +554,147 @@ async def watch_health(session):
 
 # --- the turn ---------------------------------------------------------------
 
+# Gates, not understanding. Each decides only THAT a capability is wanted; what
+# it is wanted for is worked out afterwards, by the router or by the model.
+#
+# Order is load-bearing. "Is that in my notes?" contains the word "notes" and
+# would otherwise be read as a request to write one — a question answered by
+# creating a note is a strange kind of wrong.
+_NOTE_CHECK = re.compile(
+    r"\b(?:is|are|was|were|did)\b.{0,70}\b(?:in|on)\s+(?:my|the|your)?\s*"
+    r"(?:notes|obsidian|vault)\b|^\s*(?:do i have|have i got)\b.+\bnotes?\b", re.I)
+_NOTE_MAKE = re.compile(
+    r"\b(?:note|jot|write (?:that|it|this) down|shopping list|make a list)\b"
+    r"|^\s*(?:add|put|append|stick)\b.+\b(?:to|onto|into|in|on)\b.+"
+    r"\b(?:note|list)\b", re.I)
+_RESEARCH = re.compile(
+    r"^\s*(?:research|look up|read up on|search (?:the )?web for|"
+    r"what'?s the latest on)\s+(.+?)\s*[?.!]*\s*$", re.I)
+_WEATHER = re.compile(r"^\s*(?:what'?s the )?(?:weather|forecast|temperature)\b", re.I)
+_SET_LOC = re.compile(r"^\s*set (?:my )?location (?:to )?(.+?)\s*[.!]*\s*$", re.I)
+
+
+async def research(session, chat, topic, spoken=False):
+    """Vault, then the offline encyclopedia, then the web — and file the result.
+
+    /research streams, and this does not: the caller is a chat message, which
+    arrives whole or not at all. So the stream is consumed here and sent once.
+
+    Web search is attempted but not required. The free engines rate-limit and
+    CAPTCHA server traffic, and when they all refuse the router still answers
+    from the vault and the offline archive — which is most of the value anyway.
+    """
+    text, note = "", None
+    try:
+        async with session.post(RESEARCH_URL,
+                                json={"q": topic, "agent": "local", "web": True},
+                                timeout=aiohttp.ClientTimeout(
+                                    total=None, sock_read=600)) as r:
+            if r.status == 404:
+                return await send(session, chat,
+                                  f"I found nothing on {topic}, anywhere.")
+            async for raw in r.content:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                blob = line[5:].strip()
+                if not blob or blob == "[DONE]":
+                    continue
+                try:
+                    d = json.loads(blob)
+                except Exception:
+                    continue
+                if "orb_note" in d:
+                    note = d["orb_note"]
+                try:
+                    text += d["choices"][0]["delta"].get("content", "") or ""
+                except Exception:
+                    pass
+    except Exception as exc:
+        return await send(session, chat,
+                          f"The research call failed ({type(exc).__name__}).")
+
+    text = text.strip()
+    if not text:
+        return await send(session, chat, f"I came up with nothing on {topic}.")
+    if note and note.get("file"):
+        text += f"\n\nFiled as {note['file']}."
+    await send(session, chat, text)
+    if spoken:
+        await send_voice(session, chat, text)
+
+
 async def answer(session, chat, text, spoken=False):
     low = text.strip().lower()
 
     # Deterministic commands, answered without the model for the same reason
     # the page does it: these have correct answers, and a small model asked to
     # report on itself will produce a plausible one instead.
-    if low in ("status", "health", "what's wrong", "whats wrong", "how are you"):
+    if low in ("status", "health", "what's wrong", "whats wrong"):
         _, line = await health_line(session)
         return await send(session, chat, line)
     if low in ("reset", "forget", "new chat"):
         _history.pop(chat, None)
         return await send(session, chat, "Cleared. Starting fresh.")
+    if low in ("help", "commands", "what can you do"):
+        return await send(session, chat, HELP)
+
+    m = _SET_LOC.match(text)
+    if m:
+        loc = await geocode(session, m.group(1))
+        if not loc:
+            return await send(session, chat, f"I can't find {m.group(1)}.")
+        state = load_state()
+        state["location"] = loc
+        save_state(state)
+        log(f"location set for chat {chat}")
+        return await send(session, chat,
+                          f"Set to {loc['label']}. Morning brief at {BRIEF_AT}.")
+
+    if _WEATHER.match(text):
+        return await send(session, chat, await weather_line(session))
+
+    # Checked BEFORE the note-writing gate: see the note on ordering above.
+    if _NOTE_CHECK.search(text):
+        try:
+            async with session.get(NOTES_URL, params={"q": text}) as r:
+                hits = (await r.json()).get("hits") or []
+        except Exception as exc:
+            return await send(session, chat,
+                              f"I couldn't read the vault ({type(exc).__name__}).")
+        if not hits:
+            return await send(session, chat, "No. Nothing in the vault matches that.")
+        names = ", ".join(h["title"] for h in hits[:5])
+        return await send(session, chat,
+                          f"Yes — {names}." if len(hits) <= 5 else
+                          f"Yes, {len(hits)} of them: {names}, and more.")
+
+    if _NOTE_MAKE.search(text):
+        try:
+            async with session.post(NOTE_FROM_TEXT_URL, json={"text": text},
+                                    timeout=aiohttp.ClientTimeout(
+                                        total=None, sock_read=300)) as r:
+                out = await r.json()
+        except Exception as exc:
+            return await send(session, chat,
+                              f"I couldn't write that ({type(exc).__name__}).")
+        if out.get("ok"):
+            log(f"note {out['action']}: {out['file']}")
+            # The exact contents, not a claim. A 3B extracting a note from a
+            # sentence embellishes, and the whole reason this feature exists is
+            # that it once said a note had been written when none had.
+            return await send(session, chat,
+                              f"{out['action'].capitalize()} \"{out['title']}\":\n\n"
+                              f"{out['body']}")
+        if out.get("error"):
+            return await send(session, chat, f"I couldn't: {out['error']}")
+        # Fell through to a normal answer: it did not read as a note request.
+
+    m = _RESEARCH.match(text)
+    if m:
+        topic = m.group(1)
+        await send(session, chat, f"Looking into {topic}. This takes a minute.")
+        return await research(session, chat, topic, spoken)
 
     body = {"q": text, "history": [{"role": r, "content": c}
                                    for r, c in _history.get(chat, [])]}
@@ -434,6 +780,7 @@ async def poll():
     async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_read=90)) as session:
         asyncio.create_task(watch_health(session))
+        asyncio.create_task(watch_brief(session))
         while True:
             tok = token()
             if not tok:

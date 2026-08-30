@@ -19,6 +19,7 @@ answer is knowable, it is asserted.
 Exit code is the number of failures, so it can gate a deploy.
 """
 import json
+import pathlib
 import subprocess
 import sys
 import time
@@ -357,6 +358,145 @@ def t_ask_history():
     return True, f"followed up: {answer[:70]!r}"
 
 
+def t_note_write():
+    """Create, refuse to clobber, append. The three states a note can be in."""
+    import random
+    title = f"suite note {random.randint(10000, 99999)}"
+    a = jpost("/note", {"title": title, "body": "- first"}, timeout=60) or {}
+    if a.get("action") != "created":
+        return False, f"create failed: {a}"
+    # Overwriting silently is the failure that loses a note, and a lost note is
+    # indistinguishable from one that was never written.
+    b = code_of("/note", "POST", {"title": title, "body": "- clobber"}, timeout=60)
+    c = jpost("/note", {"title": title, "body": "- second", "append": True},
+              timeout=60) or {}
+    subprocess.run(["rm", "-f", f"/opt/orb/mem/{a['file']}"], capture_output=True)
+    if b != "409":
+        return False, f"duplicate returned {b}, expected 409"
+    if c.get("action") != "appended":
+        return False, f"append failed: {c}"
+    return True, "created, refused a clobber, appended"
+
+
+def t_note_traversal():
+    """A title is never a path.
+
+    The note endpoint is reachable from Telegram, so its input comes from the
+    open internet by way of a chat message. slug() reduces to [a-z0-9-] and the
+    resolved path is checked to sit inside the vault; either alone would be a
+    single point of failure.
+    """
+    attempts = ["../../etc/passwd", "/etc/shadow", "....//....//root/.ssh/id_rsa",
+                "note/../../../tmp/escaped"]
+    made = []
+    for t in attempts:
+        out = jpost("/note", {"title": t, "body": "x"}, timeout=60) or {}
+        if out.get("file"):
+            made.append(out["file"])
+    escaped = [f for f in ("/etc/passwd.md", "/etc/shadow.md", "/tmp/escaped.md")
+               if pathlib.Path(f).exists()]
+    for f in made:
+        subprocess.run(["rm", "-f", f"/opt/orb/mem/{f}"], capture_output=True)
+    if escaped:
+        return False, "wrote outside the vault: " + ", ".join(escaped)
+    return True, f"{len(attempts)} traversal attempts all contained in the vault"
+
+
+def t_note_from_text():
+    """A sentence becomes a note, and a question does not.
+
+    The model extracts; the server writes. Extraction was measured at 15/15 on
+    format, but it embellishes — asked for one item it produced three — so the
+    body is checked for the invention that would otherwise land in the vault.
+    """
+    import random
+    tag = f"suite trial {random.randint(10000, 99999)}"
+    a = jpost("/note/from-text",
+              {"text": f"make a note called {tag} with the first item being "
+                       f"check the backup ran"}, timeout=300) or {}
+    if not a.get("ok"):
+        return False, f"did not write: {str(a)[:110]}"
+    b = jpost("/note/from-text",
+              {"text": f"add rotate the keys to my {tag} note"}, timeout=300) or {}
+    body = ""
+    f = pathlib.Path(f"/opt/orb/mem/{a['file']}")
+    if f.exists():
+        body = f.read_text(encoding="utf-8")
+    subprocess.run(["rm", "-f", str(f)], capture_output=True)
+
+    if b.get("action") != "appended":
+        return False, f"append made a second note instead: {str(b)[:110]}"
+    if "rotate the keys" not in body:
+        return False, "the appended item is not in the file"
+    if "NOTE|" in body:
+        return False, "the extraction format leaked into the note body"
+    # A question is not a note request, and answering one by filing it would be
+    # a strange kind of wrong.
+    c = jpost("/note/from-text", {"text": "what is the capital of France"},
+              timeout=300) or {}
+    if c.get("ok"):
+        return False, "wrote a note for a plain question"
+    return True, "created, appended to the same file, ignored a question"
+
+
+def t_notes_search():
+    """Short notes must be findable.
+
+    load_vault() drops anything under FACT_MAX as a fact rather than a
+    document, so "make me a note with one line on it" produces a file that
+    retrieval cannot see. /notes reads the directory for exactly that reason —
+    answering "no" about a file the user can see in Obsidian is the same
+    failure as claiming one exists.
+    """
+    import random
+    title = f"tiny note {random.randint(10000, 99999)}"
+    a = jpost("/note", {"title": title, "body": "- one line"}, timeout=60) or {}
+    hits = (jget(f"/notes?q={urllib.parse.quote(title)}", timeout=60) or {}).get("hits", [])
+    subprocess.run(["rm", "-f", f"/opt/orb/mem/{a.get('file', 'x')}"],
+                   capture_output=True)
+    return bool(hits), (f"found {hits[0]['title']!r}" if hits
+                        else "a short note was invisible to /notes")
+
+
+def t_bridge_routes():
+    """Each phrasing reaches the right capability.
+
+    Ordering is what breaks: "is that in my notes?" contains the word notes and
+    would otherwise be read as a request to write one.
+    """
+    cases = [("status", "status"), ("weather", "weather"),
+             ("set location to Keswick", "setloc"),
+             ("is that in the obsidian notes?", "check"),
+             ("do i have a note about tls", "check"),
+             ("make a note called shopping with milk on it", "make"),
+             ("add rotate the keys to my server note", "make"),
+             ("research the raspberry pi 5", "research"),
+             ("look up wireguard", "research"),
+             ("what is a semaphore", "chat"),
+             ("how do i centre a div", "chat")]
+    script = (
+        "import sys, json; sys.path.insert(0, '/app'); import nova_bridge as B\n"
+        "def route(t):\n"
+        "    low = t.strip().lower()\n"
+        "    if low in ('status','health',\"what's wrong\",'whats wrong'): return 'status'\n"
+        "    if low in ('reset','forget','new chat'): return 'reset'\n"
+        "    if low in ('help','commands','what can you do'): return 'help'\n"
+        "    if B._SET_LOC.match(t): return 'setloc'\n"
+        "    if B._WEATHER.match(t): return 'weather'\n"
+        "    if B._NOTE_CHECK.search(t): return 'check'\n"
+        "    if B._NOTE_MAKE.search(t): return 'make'\n"
+        "    if B._RESEARCH.match(t): return 'research'\n"
+        "    return 'chat'\n"
+        f"print(json.dumps([route(t) for t, _ in {cases!r}]))")
+    out = subprocess.run(["docker", "exec", "nova-bridge", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    if not out:
+        return False, "could not reach the bridge"
+    got = json.loads(out)
+    bad = [f"{t!r}->{g}" for (t, want), g in zip(cases, got) if g != want]
+    return not bad, "; ".join(bad) or f"{len(cases)} phrasings routed correctly"
+
+
 def t_bridge_isolated():
     """The Telegram bridge's blast radius, asserted rather than assumed.
 
@@ -693,7 +833,12 @@ GROUPS = [
               ("follows a thread", t_ask_history, True),
               ("bridge is isolated", t_bridge_isolated, False),
               ("bridge denies by default", t_bridge_default_deny, False),
-              ("bridge voice round trip", t_bridge_voice, True)]),
+              ("bridge voice round trip", t_bridge_voice, True),
+              ("bridge routes commands", t_bridge_routes, False),
+              ("note write and append", t_note_write, False),
+              ("note titles are not paths", t_note_traversal, False),
+              ("short notes are findable", t_notes_search, False),
+              ("sentence becomes a note", t_note_from_text, True)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),
