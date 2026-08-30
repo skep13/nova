@@ -113,6 +113,15 @@ def main():
                 body = body[:MAX_CHUNK] + "\n\n... truncated ...\n"
 
             sym = name_of(chunk, kind, i)
+            # A chunk with no symbol is the prelude before the first definition:
+            # for index.html that is four hundred lines of CSS, and as one note
+            # it is a 40 KB blob with no name that wins matches on any word it
+            # happens to contain -- "what is the centre of a circle" reached it
+            # through the word "center". The design it encodes is covered by the
+            # hand-written notes; the blob is not a unit anyone asks for.
+            if sym.startswith("part-"):
+                skipped += 1
+                continue
             title = f"{fname}: {sym}"
             fence = "python" if kind == "python" else kind
 

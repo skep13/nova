@@ -894,6 +894,54 @@ def key_terms(q):
     return out
 
 
+# British to American, because the offline archive is written in American English
+# and the user is not. Without this, "mould" and "Mold" are unrelated tokens and
+# the note that answers the question is invisible to it.
+#
+# Irregular forms first, then the productive endings. Ordering matters: -ise to
+# -ize would otherwise mangle words that only look like verbs.
+_SPELLING = {
+    "mould": "mold", "moulding": "molding", "moulds": "molds",
+    "tyre": "tire", "tyres": "tires", "kerb": "curb", "grey": "gray",
+    "plough": "plow", "draught": "draft", "programme": "program",
+    "aluminium": "aluminum", "sulphur": "sulfur", "defence": "defense",
+    "offence": "offense", "licence": "license", "practise": "practice",
+    "storey": "story", "cheque": "check", "aeroplane": "airplane",
+    "gaol": "jail", "pyjamas": "pajamas", "manoeuvre": "maneuver",
+    "oesophagus": "esophagus", "paediatric": "pediatric", "foetus": "fetus",
+    "anaemia": "anemia", "diarrhoea": "diarrhea", "haemorrhage": "hemorrhage",
+    "artefact": "artifact", "speciality": "specialty", "whilst": "while",
+    "aluminium": "aluminum", "jewellery": "jewelry", "kerosene": "kerosene",
+}
+
+# Endings that transform predictably. Each needs a minimum stem length, because
+# "our" -> "or" on a four-letter word turns "four" into "for".
+_SPELLING_SUFFIX = (
+    ("our", "or", 5),        # colour, favour, behaviour, harbour
+    ("oured", "ored", 7),
+    ("ouring", "oring", 8),
+    ("isation", "ization", 9),
+    ("isations", "izations", 10),
+    ("ise", "ize", 6),       # organise, recognise -- 6 keeps "rise" and "wise"
+    ("ised", "ized", 7),
+    ("ising", "izing", 8),
+    ("yse", "yze", 6),       # analyse, paralyse
+    ("ysed", "yzed", 7),
+    ("tre", "ter", 6),       # centre, theatre, metre -- 6 keeps "acre"
+    ("tres", "ters", 7),
+    ("logue", "log", 7),     # catalogue, dialogue
+)
+
+
+def normalise_spelling(w):
+    if w in _SPELLING:
+        return _SPELLING[w]
+    for british, american, least in _SPELLING_SUFFIX:
+        if len(w) >= least and w.endswith(british):
+            return w[: -len(british)] + american
+    return w
+
+
 def _stem(w):
     """Crude suffix stripping so scheduler/scheduling and hash/hashing meet.
 
@@ -901,6 +949,9 @@ def _stem(w):
     word forms collide. Anything under five characters is left alone, because
     that is where over-stemming starts turning distinct words into each other.
     """
+    # Spelling is reconciled before stemming, so the suffix rules below see
+    # one form rather than two.
+    w = normalise_spelling(w)
     for suf in ("ational", "ization", "isation", "ingly", "edly", "ing", "ers",
                 "er", "ed", "es", "s"):
         if len(w) - len(suf) >= 5 and w.endswith(suf):
@@ -1759,9 +1810,29 @@ async def research(request):
 
     use_web = bool(payload.get("web")) and WEB_ENABLED
     vault_hit, articles = await gather_sources(question, use_web=use_web)
+
+    # Escalate to the web when the archive came up short, rather than making the
+    # user know in advance which kind of question they asked.
+    #
+    # The archive is a snapshot: it is excellent on anything settled and silent
+    # on anything newer than itself, and the person asking has no way to tell
+    # which they are about to hit. Asking about a library released last year
+    # returned nothing and looked like a failure of the whole feature.
+    #
+    # The condition is deliberately "nearly nothing found", not "the model was
+    # unsure". A count of sources is a fact; a model's confidence is not, and
+    # this is the same rule that keeps every other decision here out of its
+    # hands. Escalating on a weak result also costs nothing when the archive DID
+    # answer, because it never runs then.
+    escalated = False
+    if WEB_ENABLED and not use_web and not vault_hit and len(articles) < 2:
+        escalated = True
+        vault_hit, articles = await gather_sources(question, use_web=True)
+
     if not vault_hit and not articles:
         return web.json_response(
-            {"error": "nothing found for that in the vault or the offline archive"},
+            {"error": "nothing found for that in the vault, the offline archive "
+                      "or the web"},
             status=404)
 
     # A caller that knows the subject can name it. Generated notes are titled
@@ -1819,7 +1890,11 @@ async def research(request):
     await resp.write(("data: " + json.dumps({
         "choices": [{"index": 0, "delta": {}}],
         "orb_note": {"file": note, "title": title, "sources": sources,
-                     "links": links or [], "agent": used_agent},
+                     "links": links or [], "agent": used_agent,
+                     # True when the archive came up short and the web was tried
+                     # without being asked. Worth surfacing: it tells the user
+                     # the answer is live rather than from the snapshot.
+                     "escalated": escalated},
     }) + "\n\n").encode())
     await resp.write(b"data: [DONE]\n\n")
     return resp
@@ -2040,7 +2115,13 @@ CODE_SYSTEM = (
     # which is the one kind of failure this loop is good at fixing.
     "Where the expected result or a property of it is knowable in advance, end "
     "with a short assert that checks it, so a wrong answer fails loudly instead "
-    "of printing quietly. Do not assert anything you are guessing at."
+    "of printing quietly. Do not assert anything you are guessing at. "
+    # Observed: asked for the sum of the first ten integers, it wrote the
+    # calculation and the assert and no print at all. The program passed, the
+    # loop reported success, and the answer was invisible. An assert is a check
+    # on the output, not a substitute for producing it.
+    "The assert is IN ADDITION to printing the result, never instead of it. "
+    "Every program must print its answer to stdout even when it also asserts."
 )
 
 
