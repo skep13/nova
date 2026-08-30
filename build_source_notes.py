@@ -33,6 +33,10 @@ FILES = [
     ("nginx.conf", "nginx", "routing: which path reaches which container"),
     ("docker-compose.yml", "yaml", "the services, their limits and their networks"),
     ("orb-backup.sh", "shell", "the nightly backup, on the Proxmox host"),
+    # The interface itself. Most of what a person asks about — why the mic
+    # stopped, what the orb does while thinking, which patterns are answered
+    # without the model — is answered here and nowhere else.
+    ("index.html", "js", "the page: commands, speech, the orb, retrieval"),
 ]
 
 # A top-level def/class in Python; a location block in nginx; a service in
@@ -40,6 +44,9 @@ FILES = [
 PY_SPLIT = re.compile(r"^(?=(?:async\s+def|def|class)\s+\w+)", re.M)
 NGINX_SPLIT = re.compile(r"^(?=\s*location\s)", re.M)
 YAML_SPLIT = re.compile(r"^(?=  \w[\w-]*:\s*$)", re.M)
+# A top-level function, or a const holding one of the command patterns. Those
+# two cover almost everything anyone asks the page about.
+JS_SPLIT = re.compile(r"^(?=(?:async\s+)?function\s+\w+|const\s+RE_\w+\s*=)", re.M)
 
 MAX_CHUNK = 7000        # a very long function is still one note, just a big one
 
@@ -51,6 +58,8 @@ def chunks(text, kind):
         parts = NGINX_SPLIT.split(text)
     elif kind == "yaml":
         parts = YAML_SPLIT.split(text)
+    elif kind == "js":
+        parts = JS_SPLIT.split(text)
     else:
         parts = [text]
     return [p for p in parts if p.strip()]
@@ -67,6 +76,13 @@ def name_of(chunk, kind, index):
             return m.group(2).strip("{ ")
     elif kind == "yaml":
         m = re.match(r"\s*([\w-]+):", chunk.strip())
+        if m:
+            return m.group(1)
+    elif kind == "js":
+        m = re.match(r"(?:async\s+)?function\s+(\w+)", chunk.strip())
+        if m:
+            return m.group(1)
+        m = re.match(r"const\s+(RE_\w+)", chunk.strip())
         if m:
             return m.group(1)
     return f"part-{index}"

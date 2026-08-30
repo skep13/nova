@@ -198,13 +198,17 @@ def t_recall_no_hubs():
 
 
 def t_recall_source():
-    # gather_sources rather than search_vault. key_terms strips underscores, so
-    # search_vault tokenises to "search" and "vault" — two words common enough
-    # in this vault to lose the title-rarity bonus, and any prose note about the
-    # vault then beats the function. That is a real limitation of splitting
-    # identifiers, recorded here rather than papered over.
-    h = recall("what does gather_sources do").get("hit") or {}
-    return "gather_sources" in (h.get("title") or ""), f"got {h.get('title')!r}"
+    # Identifiers are now indexed whole as well as split, so a function can be
+    # asked for by its exact name. Both spellings are checked: an underscore
+    # name from the router, and a camelCase one from the page.
+    bad = []
+    for q, want in (("how does search_vault score notes", "search_vault"),
+                    ("what does gather_sources do", "gather_sources"),
+                    ("what does demoteMode do", "demoteMode")):
+        h = recall(q).get("hit") or {}
+        if want not in (h.get("title") or ""):
+            bad.append(f"{want}->{h.get('title')!r}")
+    return not bad, "; ".join(bad) or "identifiers resolve by exact name"
 
 
 def t_recall_new_domains():

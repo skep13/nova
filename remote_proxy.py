@@ -860,9 +860,38 @@ about tell explain say know think give show please just really very some any the
 not have has had get got make made take put see look want need use using""".split())
 
 
+# search_vault, getUserMedia, RE_WHERE: one name, and also its parts.
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def split_identifier(word):
+    """The whole identifier, then the words inside it.
+
+    Kept as both because the two forms answer different questions. Somebody
+    typing search_vault wants that function and nothing else, and the compound
+    is rare enough to say so. Somebody asking how the vault search works wants
+    the prose, and the parts still match that. Indexing only the parts — which
+    is what stripping underscores did — loses the first case entirely.
+    """
+    out = [word]
+    if "_" in word or _CAMEL.search(word):
+        for part in _CAMEL.sub(" ", word.replace("_", " ")).split():
+            if part and part != word:
+                out.append(part)
+    return out
+
+
 def key_terms(q):
-    q = re.sub(r"[^a-z0-9\s]", " ", (q or "").lower())
-    return [w for w in q.split() if len(w) > 2 and w not in _STOP]
+    # Underscores are kept, then handled by split_identifier. Everything else
+    # that is not a letter or digit still becomes a space.
+    q = re.sub(r"[^a-zA-Z0-9_\s]", " ", q or "")
+    out = []
+    for raw in q.split():
+        for w in split_identifier(raw):
+            w = w.lower()
+            if len(w) > 2 and w not in _STOP and w not in out:
+                out.append(w)
+    return out
 
 
 def _stem(w):
@@ -880,7 +909,17 @@ def _stem(w):
 
 
 def _words(text):
-    return {_stem(w) for w in re.findall(r"[a-z0-9]+", text.lower())}
+    """Every searchable token in a piece of text.
+
+    Matches identifiers before falling back to plain words, so search_vault is
+    indexed whole as well as split. Without the whole form, a note about that
+    function is indistinguishable from any note containing "search" and "vault".
+    """
+    out = set()
+    for raw in re.findall(r"[A-Za-z0-9_]+", text):
+        for w in split_identifier(raw):
+            out.add(_stem(w.lower()))
+    return out
 
 
 def _aliases(title, body):
