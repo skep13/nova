@@ -465,6 +465,9 @@ def t_bridge_routes():
     would otherwise be read as a request to write one.
     """
     cases = [("status", "status"), ("weather", "weather"),
+             ("what the weather was like near me", "weather"),
+             ("is it going to rain", "weather"),
+             ("how does weather forecasting work", "chat"),
              ("set location to Keswick", "setloc"),
              ("is that in the obsidian notes?", "check"),
              ("do i have a note about tls", "check"),
@@ -482,7 +485,7 @@ def t_bridge_routes():
         "    if low in ('reset','forget','new chat'): return 'reset'\n"
         "    if low in ('help','commands','what can you do'): return 'help'\n"
         "    if B._SET_LOC.match(t): return 'setloc'\n"
-        "    if B._WEATHER.match(t): return 'weather'\n"
+        "    if B.wants_weather(t): return 'weather'\n"
         "    if B._NOTE_CHECK.search(t): return 'check'\n"
         "    if B._NOTE_MAKE.search(t): return 'make'\n"
         "    if B._RESEARCH.match(t): return 'research'\n"

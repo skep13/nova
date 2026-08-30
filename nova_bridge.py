@@ -790,7 +790,32 @@ _NOTE_MAKE = re.compile(
 _RESEARCH = re.compile(
     r"^\s*(?:research|look up|read up on|search (?:the )?web for|"
     r"what'?s the latest on)\s+(.+?)\s*[?.!]*\s*$", re.I)
-_WEATHER = re.compile(r"^\s*(?:what'?s the )?(?:weather|forecast|temperature)\b", re.I)
+# Anywhere in the sentence, not anchored at the front.
+#
+# The first version was "^(what's the )?(weather|forecast|temperature)", which
+# is one phrasing and a single allowed prefix. "what the weather was like near
+# me" missed it, fell through to the model, and got told Nova has no access to
+# local weather — the feature exists, it was asked for plainly, and the answer
+# was that it does not exist. That is the worst shape a narrow gate can fail
+# in, and it is the second time one has been too tight.
+_WEATHER = re.compile(
+    r"\b(?:weather|forecast|temperature|raining|snowing)\b"
+    r"|\bis it (?:going to )?(?:rain|snow|be )\w*"
+    r"|\bhow (?:hot|cold|warm|wet) is it\b"
+    r"|\bwhat'?s it like outside\b", re.I)
+
+# Questions ABOUT weather rather than requests FOR it. These belong to the
+# model and the vault: "how does weather forecasting work" is not a request for
+# today's forecast, and answering it with the temperature would be its own kind
+# of wrong.
+_NOT_WEATHER = re.compile(
+    r"\bhow does .{0,20}weather\b|\bwhat causes\b|\bexplain\b"
+    r"|\bwhat is (?:a |the )?(?:weather|forecast)\b(?! (?:like|today|now))"
+    r"|\bweather (?:station|balloon|map|model|front|system|api)\b", re.I)
+
+
+def wants_weather(text):
+    return bool(_WEATHER.search(text)) and not _NOT_WEATHER.search(text)
 _SET_LOC = re.compile(r"^\s*set (?:my )?location (?:to )?(.+?)\s*[.!]*\s*$", re.I)
 
 
@@ -871,7 +896,7 @@ async def answer(session, chat, text, spoken=False):
         return await send(session, chat,
                           f"Set to {loc['label']}. Morning brief at {BRIEF_AT}.")
 
-    if _WEATHER.match(text):
+    if wants_weather(text):
         return await send(session, chat, await weather_line(session))
 
     if _LIST_REM.match(text):
