@@ -18,6 +18,7 @@ answer is knowable, it is asserted.
 
 Exit code is the number of failures, so it can gate a deploy.
 """
+import datetime
 import json
 import pathlib
 import subprocess
@@ -616,6 +617,38 @@ def t_closing_offer_stripped():
     return not bad, "; ".join(bad)[:130] or "4 empty sign-offs cut, 4 useful lines kept"
 
 
+def t_knows_the_time():
+    """Nova is told the hour, and names the right part of the day.
+
+    It greeted with "Morning" at seven in the evening. Nothing had ever told it
+    the time, and the persona's own example greeting began with the word
+    "Morning" — an example is the strongest thing in a prompt, so that is what
+    it copied, at every hour.
+
+    Checks the part of day is correct for the router's clock rather than
+    hard-coding one, so the test means the same thing whenever it is run.
+    """
+    script = (
+        "import sys, json, datetime; sys.path.insert(0, '/app')\n"
+        "import remote_proxy as R\n"
+        "h = datetime.datetime.now().hour\n"
+        "want = ('the early hours' if h < 5 else 'morning' if h < 12 else\n"
+        "        'afternoon' if h < 18 else 'evening' if h < 22 else 'night')\n"
+        "print(json.dumps([R.time_context(), want, h]))")
+    out = subprocess.run(["docker", "exec", "orb-remote", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    if not out:
+        return False, "could not reach the router"
+    line, want, hour = json.loads(out)
+    if want not in line:
+        return False, f"hour {hour} but the context says {line[:70]!r}"
+    # And the clock itself has to be local. The container ran UTC for a day,
+    # which would put this an hour out and be invisible in the wording.
+    if datetime.datetime.now().strftime("%H") and str(hour) not in line:
+        return False, f"hour {hour} not stated in {line[:70]!r}"
+    return True, f"{want}, hour {hour}"
+
+
 def t_opening_filler_stripped():
     """Praise for the question, and disclaiming a self, both cut from the front.
 
@@ -1032,7 +1065,8 @@ GROUPS = [
               ("a reminder fires and clears", t_reminder_fires, True),
               ("closing offer stripped", t_closing_offer_stripped, False),
               ("note question framing", t_notes_question_words, False),
-              ("opening filler stripped", t_opening_filler_stripped, False)]),
+              ("opening filler stripped", t_opening_filler_stripped, False),
+              ("knows the time of day", t_knows_the_time, False)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),

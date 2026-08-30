@@ -2045,9 +2045,21 @@ async def health(request):
             # The model is asked to generate one token, not merely to list
             # models: llama serves /v1/models happily while the weights are
             # still loading, and "can it answer" is the question.
+            # 30s, not the 8 it was and not the 60 I first tried.
+            #
+            # 8 reported llama DOWN when a one-token completion took 24 seconds
+            # — which it did, under load and with the SATA link degraded. llama
+            # was answering the whole time, and "down" sends you to restart the
+            # thing that was working.
+            #
+            # 60 was worse: nginx gives /health 60s, so a slow llama made the
+            # health endpoint itself time out and return nothing at all. A
+            # monitor that hangs when the system is unwell is no monitor. This
+            # has to stay comfortably under the nginx ceiling.
             _probe(s, "llama", "POST", LOCAL_URL,
                    json={"messages": [{"role": "user", "content": "ok"}],
-                         "max_tokens": 1, "stream": False}),
+                         "max_tokens": 1, "stream": False},
+                   timeout=aiohttp.ClientTimeout(total=30)),
             _probe(s, "piper", "GET", PIPER_URL + "/voices", want=(200, 404)),
             # whisper-server answers /inference and nothing else, so a bare
             # GET is expected to be rejected — a 400 or 404 still proves the
@@ -2315,6 +2327,27 @@ async def complete(session, agent, messages, max_tokens, temperature=None):
 # on one side or the other, and "what can you do" was already answered with a
 # vague description of being an AI — which is what you get when nothing tells
 # it what it has.
+def time_context():
+    """The current local time, stated plainly for the model.
+
+    It greeted with "Morning" at seven in the evening. Nothing had ever told it
+    the time — the persona's own example greeting is "Morning. What are we up
+    to?", so that is what it copied, and it would have gone on doing so at
+    every hour of the day.
+
+    The part of day is named rather than left to be worked out from the clock,
+    because that is the bit actually used in a greeting and a 3B doing
+    arithmetic on it is a needless chance to get it wrong.
+    """
+    now = datetime.datetime.now()
+    h = now.hour
+    part = ("the early hours" if h < 5 else "morning" if h < 12 else
+            "afternoon" if h < 18 else "evening" if h < 22 else "night")
+    return (f"Right now it is {now.strftime('%A %d %B %Y, %H:%M')} — "
+            f"{part}. Greet and refer to the time accordingly; never say "
+            f"morning in the evening.")
+
+
 ASK_CAPABILITIES = (
     "What you have here: your own knowledge, and the user's personal vault of "
     "about 1400 notes, which is searched automatically before every question — "
@@ -2449,6 +2482,10 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
     system = (persona.PERSONA if persona_on else persona.PLAIN) + persona.CORE_RULES
     if persona_on:
         system += "\n\n" + ASK_CAPABILITIES
+    # Always, persona or not: the time is a fact about the world rather than a
+    # matter of character, and a plain assistant saying "morning" at seven in
+    # the evening is just as wrong.
+    system += "\n\n" + time_context()
     messages = [{"role": "system", "content": system}]
     if persona_on:
         # Demonstrated, not described. A 3B ignores a description of a voice and
@@ -2842,21 +2879,37 @@ async def code(request):
                          "stdout": (run.get("stdout") or "")[:2000],
                          "stderr": (run.get("stderr") or "")[:2000]})
 
-            if run.get("ok"):
+            # Ran cleanly AND said something. Asked to print the sum of the
+            # first ten integers, the model wrote a correct function and never
+            # called it: exit 0, no output, and the loop declared success. A
+            # program that produces nothing has not done the task, and "no
+            # error" is not the same as "an answer" — that distinction is the
+            # entire reason this loop exists rather than a single generation.
+            produced = bool((run.get("stdout") or "").strip())
+            if run.get("ok") and produced:
                 break
             if attempt == CODE_ATTEMPTS:
                 break
 
             # The error goes back verbatim. Summarising it would remove the line
             # number, which is the only part that reliably helps.
+            if run.get("ok"):
+                complaint = ("That ran without error but printed nothing, so it "
+                             "did not answer the question. Call your code and "
+                             "print the result. Output only the corrected "
+                             "program.")
+            else:
+                complaint = ("That failed when run. Fix it and output only the "
+                             "corrected program.\n\nstderr:\n"
+                             + (run.get("stderr") or "")[:1500])
             messages = messages[:2] + [
                 {"role": "assistant", "content": final_code},
-                {"role": "user", "content":
-                    "That failed when run. Fix it and output only the corrected "
-                    "program.\n\nstderr:\n" + (run.get("stderr") or "")[:1500]},
+                {"role": "user", "content": complaint},
             ]
 
-    ok = bool(final_run and final_run.get("ok"))
+    # Same bar as the loop above: ran, and produced something.
+    ok = bool(final_run and final_run.get("ok")
+              and (final_run.get("stdout") or "").strip())
     log_exchange(task, final_code, f"code/{used}", None)
     await event({"stage": "done", "ok": ok, "agent": used,
                  "attempts": attempt if final_run else 0,
