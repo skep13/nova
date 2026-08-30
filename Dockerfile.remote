@@ -2,6 +2,12 @@
 # No model weights and no translation layer, so it costs almost nothing to run.
 FROM python:3.11-slim
 
+# tzdata so TZ works: this container names every exchange log by local
+# time, and UTC logs beside the bridge's local ones are an hour apart.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir aiohttp
 
 COPY remote_proxy.py /app/remote_proxy.py

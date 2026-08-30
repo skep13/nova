@@ -808,9 +808,17 @@ _WEATHER = re.compile(
 # model and the vault: "how does weather forecasting work" is not a request for
 # today's forecast, and answering it with the temperature would be its own kind
 # of wrong.
+#
+# "the" is the entire difference and the first version got it backwards.
+# "what is weather" asks for a definition; "what is THE weather" asks for the
+# forecast — and that is the commonest way anybody asks. Treating them alike
+# sent the plainest possible request to the model, which answered "I have no
+# weather feed here, I am offline by design."
+#
+# So the article is what disqualifies the exclusion, not what it tolerates.
 _NOT_WEATHER = re.compile(
     r"\bhow does .{0,20}weather\b|\bwhat causes\b|\bexplain\b"
-    r"|\bwhat is (?:a |the )?(?:weather|forecast)\b(?! (?:like|today|now))"
+    r"|\bwhat is (?:a |an )?(?:weather|forecast)\b(?! (?:like|today|now))"
     r"|\bweather (?:station|balloon|map|model|front|system|api)\b", re.I)
 
 

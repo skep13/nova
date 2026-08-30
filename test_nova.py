@@ -466,6 +466,9 @@ def t_bridge_routes():
     """
     cases = [("status", "status"), ("weather", "weather"),
              ("what the weather was like near me", "weather"),
+             ("What is the weather", "weather"),
+             ("what is the forecast", "weather"),
+             ("what is weather", "chat"),
              ("is it going to rain", "weather"),
              ("how does weather forecasting work", "chat"),
              ("set location to Keswick", "setloc"),

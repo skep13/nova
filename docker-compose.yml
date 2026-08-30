@@ -304,6 +304,12 @@ services:
       # than one request a second. Both are enforced in the router rather than
       # trusted to the browser.
       - GEOCODE_UA=Nova/1.0 (self-hosted personal assistant)
+      # The router names every exchange log by the time it happened, and it was
+      # writing them in UTC while the bridge logged BST — an hour apart, which
+      # made correlating "the bot answered at 18:25" with "172542-what-is-the-
+      # weather.md" a small puzzle in the middle of a real diagnosis. Both
+      # clocks local now.
+      - TZ=${NOVA_TZ:-Europe/London}
     volumes:
       - ./logs:/logs
       - ./keys:/run/keys:ro
