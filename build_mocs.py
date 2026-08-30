@@ -535,7 +535,38 @@ def read_meta(p):
     return (t.group(1).strip() if t else p.stem), tags
 
 
-def classify(title, domain):
+# The hand-written cheatsheets are grouped by tag rather than by title keyword,
+# and deliberately so. Keyword rules would scatter them: "Docker and Compose in
+# practice" would land beside the encyclopedia article on containers, "cron and
+# crontab" beside the one on job schedulers. That is the wrong neighbour. A
+# lookup table and an explanation of the same subject are used at different
+# moments, and someone reaching for the first does not want the second.
+#
+# The slug is scoped to the domain. Every other topic name in this file is
+# hand-chosen and unique by inspection, but this one is generated for six
+# domains at once, and hub files are written as a flat moc-<topic>.md — an
+# unscoped name would have all six overwrite one file, leaving five domain hubs
+# pointing at a list of someone else's notes. Silent, and only visible in the
+# graph.
+REFERENCE_SUFFIX = "-quick-reference"
+REFERENCE_DESC = ("Lookup tables, flags and values — written to be consulted "
+                  "mid-task rather than read.")
+REFERENCE_TITLES = {
+    "code": "Programming quick reference",
+    "ops": "Operations quick reference",
+    "cs": "Computing quick reference",
+    "security": "Security quick reference",
+    "make": "Workshop quick reference",
+    "kitchen": "Kitchen quick reference",
+    "sci": "Measurement quick reference",
+}
+
+
+def classify(title, domain, tags=()):
+    # Keyed on "ref", not "reference": threat-model.md is tagged reference and
+    # is prose, so the broader tag would file an essay among the cheatsheets.
+    if "ref" in tags:
+        return domain + REFERENCE_SUFFIX
     low = title.lower()
     for topic, _desc, keys in RULES.get(domain, []):
         if any(k in low for k in keys):
@@ -544,10 +575,18 @@ def classify(title, domain):
 
 
 def desc_for(domain, topic):
+    if topic.endswith(REFERENCE_SUFFIX):
+        return REFERENCE_DESC
     for t, d, _ in RULES.get(domain, []):
         if t == topic:
             return d
     return FALLBACK[domain][1]
+
+
+def topic_title(domain, topic):
+    if topic.endswith(REFERENCE_SUFFIX):
+        return REFERENCE_TITLES.get(domain, "Quick reference")
+    return topic.replace("-", " ").capitalize()
 
 
 def frontmatter(title, tags):
@@ -579,7 +618,7 @@ def main():
         # describes it.
         if not domain:
             continue
-        buckets.setdefault(domain, {}).setdefault(classify(title, domain), []).append((title, p.stem))
+        buckets.setdefault(domain, {}).setdefault(classify(title, domain, tags), []).append((title, p.stem))
 
     made = 0
     for domain, dom_title, dom_desc in DOMAINS:
@@ -589,10 +628,17 @@ def main():
         # sequence rather than alphabetically by accident.
         order = [t for t, _, _ in RULES.get(domain, []) if t in topics]
         order += [t for t in topics if t not in order]
+        # Reference first in every domain hub: it is the thing most often
+        # wanted, and it is the only topic in the vault written rather than
+        # derived, so it should not be buried under the encyclopedia.
+        ref_topic = domain + REFERENCE_SUFFIX
+        if ref_topic in order:
+            order.remove(ref_topic)
+            order.insert(0, ref_topic)
 
         for topic in order:
             notes = sorted(topics[topic])
-            title = topic.replace("-", " ").capitalize()
+            title = topic_title(domain, topic)
             lines = [f"- [[{s}|{t}]]" for t, s in notes]
             body = (frontmatter(title, ["moc", domain])
                     + f"# {title}\n\n{desc_for(domain, topic)}\n\n"
@@ -601,7 +647,7 @@ def main():
             (VAULT / f"moc-{topic}.md").write_text(body, encoding="utf-8")
             made += 1
 
-        lines = [f"- [[moc-{t}|{t.replace('-', ' ').capitalize()}]] — {len(topics[t])} notes"
+        lines = [f"- [[moc-{t}|{topic_title(domain, t)}]] — {len(topics[t])} notes"
                  for t in order]
         total = sum(len(v) for v in topics.values())
         body = (frontmatter(dom_title, ["moc", domain])

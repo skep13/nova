@@ -846,8 +846,13 @@ def load_vault(force=False):
             # from what a person or the archive did. Only /research acts on it.
             generated = bool(fm and re.search(r"^tags:.*\bresearch\b",
                                               fm.group(1), re.M))
+            # The hand-written cheatsheets. Flagged here rather than inferred
+            # from the filename so a note keeps its status if it is ever moved
+            # or renamed.
+            reference = bool(fm and re.search(r"^tags:.*\bref\b",
+                                              fm.group(1), re.M))
             notes.append({"file": p.name, "title": title or p.stem, "body": body,
-                          "generated": generated})
+                          "generated": generated, "reference": reference})
     except Exception:
         pass
     _vault, _vault_stamp = notes, stamp
@@ -952,10 +957,38 @@ def _stem(w):
     # Spelling is reconciled before stemming, so the suffix rules below see
     # one form rather than two.
     w = normalise_spelling(w)
+
+    # "-es" is two plurals wearing one spelling, and stripping both the same way
+    # split words from themselves. "certificates" lost the whole "-es" and
+    # became certificat while the singular kept its "e", so a note TITLED
+    # "...certificates..." scored only BODY weight against a question about a
+    # certificate — and lost to the encyclopedia article. The same hole covered
+    # packages, services, interfaces, devices: every word whose singular already
+    # ends in e. Measured at 13 of 20 common pairs failing to meet.
+    #
+    # English tells the two apart by what precedes: boxes, watches and classes
+    # add a syllable, certificates only adds "s". That needs no dictionary.
+    if len(w) > 6 and w.endswith("es") and not w.endswith(("ses", "xes", "zes",
+                                                           "ches", "shes")):
+        w = w[:-1]
+
+    # No English plural ends in "ss", so the rule below must not treat one as
+    # such: it was turning process into proces and address into addres, neither
+    # of which any other form reaches.
     for suf in ("ational", "ization", "isation", "ingly", "edly", "ing", "ers",
                 "er", "ed", "es", "s"):
+        if suf == "s" and w.endswith("ss"):
+            break
         if len(w) - len(suf) >= 5 and w.endswith(suf):
-            return w[: -len(suf)]
+            w = w[: -len(suf)]
+            break
+
+    # Finally the silent "e", so that the "-es" plurals stripped above meet the
+    # singulars that keep it: certificate and certificates both reach
+    # certificat. Which form is reached does not matter; that both reach the
+    # same one is the whole point.
+    if len(w) >= 6 and w.endswith("e"):
+        w = w[:-1]
     return w
 
 
@@ -1016,6 +1049,27 @@ def _build_index():
     return df
 
 
+# A question about how to DO something, as opposed to what something IS.
+#
+# This exists because three probes lost by an exact tie. "how much water for
+# rice" scores identically against the cheatsheet and against the encyclopedia
+# article on rice — one query term in each title, one in each body — and the
+# winner was decided by which filename sorted first. An arbitrary tie-break is
+# still arbitrary when it happens to be right.
+#
+# Query shape is the honest discriminator. Someone asking "what is rice" wants
+# the article; someone asking "how much water for rice" wants the ratio. The
+# same two notes, and the question itself says which. So the nudge is applied
+# only to operational phrasing, and it is small — 1.15 breaks a tie and loses a
+# real contest, which is the intent. A flat boost would have made the
+# cheatsheet win "what is rice" too, which is worse than the bug.
+_OPERATIONAL = re.compile(
+    r"\bhow (?:do|would|can|should) (?:i|you|we)\b|\bhow (?:much|many|long|hot)\b"
+    r"|\bwhat (?:temperature|port|ratio|flag|command|setting|size|speed)\b"
+    r"|\bwhy (?:is|does|did|do|won't|wont|isn't|cant|can't)\b"
+    r"|\bhow to\b|\bsyntax for\b|\bcommand for\b|\bwhat does .{1,30}\b(?:do|mean|show)\b")
+
+
 def search_vault(query, allow_generated=True):
     """Best matching note, as a 900-char excerpt centred on the match.
 
@@ -1033,6 +1087,7 @@ def search_vault(query, allow_generated=True):
     # "Common" is the same 8% line the autolinker uses to decide whether a
     # one-word title is worth linking. One definition, two callers.
     common_df = total * 0.08
+    operational = bool(_OPERATIONAL.search(query.lower()))
 
     best, best_score = None, 0.0
     for n in _vault:
@@ -1072,6 +1127,10 @@ def search_vault(query, allow_generated=True):
         # second, not a reason to be invisible.
         if n.get("generated"):
             score *= 0.7
+        # See _OPERATIONAL. Deliberately after the generated penalty, so a
+        # research note that happens to be tagged ref cannot claw back its 0.7.
+        if operational and n.get("reference"):
+            score *= 1.15
 
         if score > best_score:
             best, best_score = n, score

@@ -223,6 +223,62 @@ def t_recall_new_domains():
     return not bad, "; ".join(bad) or "all three domains answer"
 
 
+def t_recall_reference():
+    """The hand-written cheatsheets, asked for the way a person asks.
+
+    Each of these lost to an encyclopedia article at some point. Two separate
+    causes: a title that did not carry the word anybody types, and a stemmer
+    that split "certificates" from "certificate" so a title match scored as a
+    body match. Neither failed loudly — retrieval returned a plausible article
+    every time — so they are pinned here rather than trusted to stay fixed.
+    """
+    want = {"why is my certificate not trusted": "TLS",
+            "how much water for rice": "Cooking ratios",
+            "how do i make a virtual environment": "Python virtual environments",
+            "how do i centre a div": "CSS flexbox",
+            "what is iso 8601": "Date and time formats",
+            "what port is postgres on": "Common network ports"}
+    bad = []
+    for q, expect in want.items():
+        got = (recall(q).get("hit") or {}).get("title") or ""
+        if not got.startswith(expect):
+            bad.append(f"{q!r}->{got!r}")
+    return not bad, "; ".join(bad) or f"{len(want)} reference lookups resolve"
+
+
+def t_stem_plurals():
+    """Singular and plural have to reach the same stem or they never meet.
+
+    Measured at 13 of 20 common pairs failing, every one of them silently: the
+    query still returned something, just the wrong thing. The four exceptions
+    are short words held back by the length floor, which exists to stop
+    over-stemming turning distinct words into each other.
+    """
+    pairs = [("certificate", "certificates"), ("package", "packages"),
+             ("service", "services"), ("database", "databases"),
+             ("interface", "interfaces"), ("device", "devices"),
+             ("process", "processes"), ("address", "addresses"),
+             ("branch", "branches"), ("cache", "caches"),
+             ("watch", "watches"), ("class", "classes"),
+             ("image", "images"), ("module", "modules"),
+             ("value", "values"), ("table", "tables")]
+    # Asked of the running container rather than through an HTTP endpoint.
+    # _stem has no route and does not deserve one: adding a debug endpoint to
+    # production so a test can reach an internal function is a worse trade than
+    # this test knowing the container's name.
+    words = sorted({w for pair in pairs for w in pair})
+    script = ("import sys, json; sys.path.insert(0, '/app'); import remote_proxy as R;"
+              f"print(json.dumps({{w: R._stem(w) for w in {words!r}}}))")
+    out = subprocess.run(["docker", "exec", "orb-remote", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    if not out:
+        return False, "could not reach _stem in the container"
+    stems = json.loads(out)
+    bad = [f"{a}={stems.get(a)} {b}={stems.get(b)}"
+           for a, b in pairs if stems.get(a) != stems.get(b)]
+    return not bad, "; ".join(bad) or f"{len(pairs)} singular/plural pairs meet"
+
+
 # -------------------------------------------------------------- research ---
 def t_research_floor():
     return code_of("/research", "POST",
@@ -414,7 +470,9 @@ GROUPS = [
                    ("semantic fallback", t_recall_semantic, False),
                    ("hubs excluded", t_recall_no_hubs, False),
                    ("source code", t_recall_source, False),
-                   ("new domains", t_recall_new_domains, False)]),
+                   ("new domains", t_recall_new_domains, False),
+                   ("reference notes", t_recall_reference, False),
+                   ("stem plurals", t_stem_plurals, False)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),
