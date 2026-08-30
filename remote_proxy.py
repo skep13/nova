@@ -2357,14 +2357,67 @@ _SMALL_TALK = re.compile(
 #
 # Only ever the LAST sentence, and only when it is one of these. A reply that
 # genuinely ends in a question to the user is left alone.
+# Narrowed when the persona was warmed up.
+#
+# It used to cut any "let me know if ..." and any "feel free to ask", which
+# took "let me know if you want the hourly" out along with "let me know if you
+# need anything else". The first is a friend being useful; the second is a
+# ticket being closed. Only the CONTENTLESS ones go now — the ones that offer
+# help in general rather than one specific next thing.
 _CLOSING_OFFER = re.compile(
     r"(?:^|(?<=[.!?]))\s*(?:"
     r"(?:so\s+)?(?:how|what)\s+(?:can|may|else\s+can)\s+i\s+(?:help|assist|do)\b[^.!?]*"
     r"|is\s+there\s+anything\s+else\b[^.!?]*"
-    r"|let\s+me\s+know\s+if\s+(?:you|there|i)\b[^.!?]*"
-    r"|feel\s+free\s+to\s+(?:ask|reach)\b[^.!?]*"
-    r"|(?:i'?m\s+)?happy\s+to\s+help\b[^.!?]*"
+    r"|let\s+me\s+know\s+if\s+you\s+(?:need|want|have)\s+"
+    r"(?:anything|any\s+(?:more|other|further))\b[^.!?]*"
+    r"|feel\s+free\s+to\s+(?:ask|reach)\s+(?:me\s+)?(?:anything|any\s?time|if)\b[^.!?]*"
+    r"|(?:i'?m\s+)?(?:happy|glad)\s+to\s+help\b[^.!?]*"
     r")[.!?]*\s*$", re.I)
+
+
+# Praise for the question, removed from the front for the same reason the empty
+# sign-off is removed from the back: it is named in the persona, banned by
+# example, and still turns up. "Considering you're asking, it's a good
+# question" preceded a hedge; the praise and the hedge are the same instinct.
+#
+# Only when something follows it. If the entire reply is "That's a great
+# question" then it is the only reply there is, and an empty message is worse.
+_OPENING_PRAISE = re.compile(
+    r"^\s*(?:(?:well|ah|oh|so)[,!.]?\s+)?"
+    r"(?:(?:considering\s+)?(?:you'?re|you\s+are)\s+asking[,!.]?\s*)?"
+    r"(?:that'?s|this\s+is|it'?s|what\s+a)\s+"
+    r"(?:a\s+|an\s+)?(?:really\s+|very\s+|such\s+a\s+)?"
+    r"(?:great|good|excellent|interesting|fair|nice|smart|awesome|fantastic)\s+"
+    r"(?:question|point|one|idea|call)\b[^.!?]*[.!?]+\s*", re.I)
+
+
+# The other opener worth deleting: disclaiming a self before answering.
+#
+# Asked "do you think I should switch models", the reply began "I don't think
+# about personal preferences, but ..." — and the useful half was after the
+# comma. The persona bans "I do not have personal preferences" by name and this
+# arrived as a paraphrase, which instruction cannot catch and a pattern can.
+#
+# The clause is removed, not the answer: whatever followed the "but" was the
+# actual reply and is kept, capitalised back up.
+_SELF_DISCLAIMER = re.compile(
+    r"^\s*(?:as an ai[,\s]*)?i\s+(?:do\s?n[o']t|can\s?not|cannot|don'?t)\s+"
+    r"(?:really\s+)?(?:have|think about|hold|form|possess|experience)\s+"
+    r"(?:any\s+|my\s+own\s+|specific\s+)?"
+    r"(?:personal\s+)?(?:preferences?|opinions?|feelings?|thoughts?|desires?|"
+    # Lazy, not greedy. Greedy ran past the "but" to the full stop at the end
+    # and consumed the whole reply — sub() returned an empty string, the
+    # "never return nothing" fallback handed back the original untouched, and
+    # the filter looked like it simply did not fire. It was firing far too well.
+    r"views?|beliefs?)\b[^.!?]*?(?:[,.]?\s*but\s+|[.!?]\s*)", re.I)
+
+
+def strip_opening_praise(text):
+    cleaned = _OPENING_PRAISE.sub("", text or "", count=1).strip()
+    cleaned = _SELF_DISCLAIMER.sub("", cleaned, count=1).strip()
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned or (text or "").strip()
 
 
 def strip_closing_offer(text):
@@ -2435,7 +2488,7 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
         answer, used = await complete(s, agent, messages, max_tokens,
                                       temperature=0.6)
 
-    answer = strip_closing_offer(answer)
+    answer = strip_closing_offer(strip_opening_praise(answer))
     log_exchange(question, answer, used, agent.get("model") or "")
     return {"answer": answer, "agent": used,
             "source": hit["title"] if hit else None}

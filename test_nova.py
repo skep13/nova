@@ -577,19 +577,27 @@ def t_reminder_fires():
 
 
 def t_closing_offer_stripped():
-    """The stock sign-off is deleted, and real questions are not.
+    """The EMPTY sign-off is deleted; a specific follow-up survives.
 
-    The persona forbids these by name and the model still reaches for one now
-    and then — zero in eighteen replies, then straight back on the nineteenth.
-    Sampling is sampling, so the closed set of phrasings is removed after the
-    fact rather than asked about more firmly.
+    The persona forbids the stock sign-offs by name and the model still reaches
+    for one now and then — zero in eighteen replies, then straight back on the
+    nineteenth — so the closed set is removed after the fact.
+
+    The line this test draws moved when the persona was warmed up. It used to
+    assert that "Let me know if you want the hourly" should go, on the grounds
+    that it is an offer of help. It is, but it is a SPECIFIC one: it names the
+    next thing and moves the conversation along, which is a friend being useful
+    rather than a ticket being closed. Only the contentless offers go now, and
+    the difference between the two is the whole point of the filter.
     """
     script = (
         "import sys, json; sys.path.insert(0, '/app'); import remote_proxy as R\n"
         "cases = ['I am fine. What can I help with today?',\n"
         "         'It is owner-only. How can I help you?',\n"
         "         'Done. Is there anything else you need?',\n"
+        "         'Sorted. Let me know if you need anything else.',\n"
         "         'Rain later. Let me know if you want the hourly.',\n"
+        "         'Done. Want me to add it to the upgrade note?',\n"
         "         'I do not know. Which version are you on?',\n"
         "         'That depends. Are you using systemd?']\n"
         "print(json.dumps([R.strip_closing_offer(c) for c in cases]))")
@@ -598,11 +606,50 @@ def t_closing_offer_stripped():
     if not out:
         return False, "could not reach the router"
     got = json.loads(out)
-    want = ["I am fine.", "It is owner-only.", "Done.", "Rain later.",
+    want = ["I am fine.", "It is owner-only.", "Done.", "Sorted.",
+            # Kept from here down.
+            "Rain later. Let me know if you want the hourly.",
+            "Done. Want me to add it to the upgrade note?",
             "I do not know. Which version are you on?",
             "That depends. Are you using systemd?"]
     bad = [f"{g!r}" for g, w in zip(got, want) if g != w]
-    return not bad, "; ".join(bad)[:130] or "4 sign-offs cut, 2 real questions kept"
+    return not bad, "; ".join(bad)[:130] or "4 empty sign-offs cut, 4 useful lines kept"
+
+
+def t_opening_filler_stripped():
+    """Praise for the question, and disclaiming a self, both cut from the front.
+
+    Same technique as the closing sign-off and the same reason: the persona
+    bans both by name, they arrive as paraphrases anyway, and a closed set of
+    phrasings is deleted more reliably than it is instructed away.
+
+    The greedy-quantifier case is pinned deliberately. "[^.!?]*" ran past the
+    "but" to the end of the sentence and consumed the whole reply, sub()
+    returned empty, and the never-return-nothing fallback handed back the
+    original — so the filter looked inert when it was in fact firing far too
+    well. The half after the "but" is the answer and has to survive.
+    """
+    q = chr(39)
+    strip = [("I don" + q + "t think about personal preferences, but a bigger "
+              "model would help.", "A bigger model would help."),
+             ("I do not have personal preferences. SQLite is the better choice.",
+              "SQLite is the better choice."),
+             ("That" + q + "s a great question. Use SQLite.", "Use SQLite.")]
+    keep = ["I think you should stay on the 3B.",
+            "I don" + q + "t know.",
+            "Nice one, that bridge was fiddly."]
+    script = (
+        "import sys, json; sys.path.insert(0, '/app'); import remote_proxy as R\n"
+        f"print(json.dumps([R.strip_opening_praise(t) for t in "
+        f"{[a for a, _ in strip] + keep!r}]))")
+    out = subprocess.run(["docker", "exec", "orb-remote", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    if not out:
+        return False, "could not reach the router"
+    got = json.loads(out)
+    want = [b for _, b in strip] + keep
+    bad = [f"{g!r}" for g, w in zip(got, want) if g != w]
+    return not bad, "; ".join(bad)[:130] or "3 fillers cut, 3 real openings kept"
 
 
 def t_notes_question_words():
@@ -984,7 +1031,8 @@ GROUPS = [
               ("reminder times parse", t_reminder_times, False),
               ("a reminder fires and clears", t_reminder_fires, True),
               ("closing offer stripped", t_closing_offer_stripped, False),
-              ("note question framing", t_notes_question_words, False)]),
+              ("note question framing", t_notes_question_words, False),
+              ("opening filler stripped", t_opening_filler_stripped, False)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),
