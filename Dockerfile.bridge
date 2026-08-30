@@ -3,6 +3,14 @@
 # which is the whole reason this is Telegram and not a WhatsApp webhook.
 FROM python:3.11-slim
 
+# ffmpeg is here for voice notes, and is the only reason this is not a bare
+# slim image. Telegram speaks OGG/Opus at both ends, whisper.cpp wants 16 kHz
+# mono WAV, and Piper returns WAV — so something has to transcode. The bridge
+# degrades to text-only if it is ever absent rather than failing outright.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir aiohttp
 
 COPY nova_bridge.py /app/nova_bridge.py
@@ -10,6 +18,8 @@ WORKDIR /app
 
 ENV NOVA_ASK_URL=http://remote:5003/ask \
     NOVA_HEALTH_URL=http://remote:5003/health \
+    NOVA_STT_URL=http://whisper:8080/inference \
+    NOVA_TTS_URL=http://piper:5000/synthesize \
     TG_KEY=/run/keys/telegram.key \
     BRIDGE_STATE=/logs/bridge-state.json
 

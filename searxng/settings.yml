@@ -41,6 +41,22 @@ engines:
     disabled: false
   - name: startpage
     disabled: false
+  # Added after all four general engines refused at once — brave and google cse
+  # suspended for "too many requests", duckduckgo and startpage on CAPTCHA —
+  # which took the whole web-research path down rather than degrading it.
+  #
+  # The cause was the test suite: every full run researches something live, and
+  # six runs in a day is enough to exhaust the free tolerance of engines that
+  # are only tolerating server traffic in the first place.
+  #
+  # Mojeek and Marginalia run their own indexes rather than proxying somebody
+  # else's, so they have no reason to CAPTCHA a self-hosted client. They are
+  # smaller and will not replace the big four on breadth; the point is that
+  # something still answers when the big four are sulking.
+  - name: mojeek
+    disabled: false
+  - name: marginalia
+    disabled: false
   - name: github
     disabled: false
   - name: stackoverflow

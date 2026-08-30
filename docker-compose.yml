@@ -325,15 +325,18 @@ services:
   # Tailscale Funnel stays off — which matters here because the WebDAV vault
   # below is served unauthenticated by request.
   #
-  # Enrolment is two steps and neither is done for you:
-  #   1. Get a token from @BotFather, then on the Proxmox host:
-  #        install -m 700 -d /opt/orb/keys/bridge
-  #        (paste token) > /opt/orb/keys/bridge/telegram.key   # umask 077
-  #   2. Message the bot once. It refuses and replies with your chat id.
-  #      Put that id in NOVA_TG_ALLOW below and recreate this service.
+  # Enrolment is one step: get a token from @BotFather, write it to
+  # /opt/orb/keys/bridge/telegram.key (mode 600), then send the bot the code in
+  # NOVA_TG_ENROL as your first message. That claims the bot, persists the chat
+  # id to /logs/bridge-state.json, and burns the code.
   #
-  # Without a token it waits quietly; with a token and an empty allowlist it
-  # answers nobody. Both are the safe failure.
+  # By code rather than by trusting whoever messages first. Trust-on-first-use
+  # would be simpler and is wrong: between the token being installed and the
+  # owner sending a message, anyone who knows the bot's name is the first, and
+  # the failure is silent and permanent.
+  #
+  # Without a token it waits quietly; with a token and no enrolment it answers
+  # nobody. Both are the safe failure.
   bridge:
     build:
       context: .
@@ -347,8 +350,18 @@ services:
       # safe reading of an unset variable. An open bot would hand a stranger an
       # assistant with the whole personal vault attached.
       - NOVA_TG_ALLOW=${NOVA_TG_ALLOW:-}
+      # One-time claim code. Single use — spent on first success and recorded
+      # in bridge-state.json, so a leak afterwards is worth nothing. Unknown
+      # senders are rate limited before it is checked, so it cannot be
+      # brute forced at network speed.
+      - NOVA_TG_ENROL=${NOVA_TG_ENROL:-nova-cedar-rowan-delta-umber-9346}
       - NOVA_TG_PER_MIN=12
       - NOVA_HEALTH_EVERY=300
+      # Voice notes: 2 minutes in, and past ~700 characters a reply is text
+      # only. Piper on two cores is not quick, and nobody wants a four-minute
+      # voice note read at them.
+      - NOVA_MAX_VOICE_S=120
+      - NOVA_MAX_SPEAK_CHARS=700
     volumes:
       # Only the bridge's own key, in its own directory. Mounting ./keys here
       # would hand the Telegram relay every model provider key as well, and it
@@ -357,8 +370,11 @@ services:
       - ./logs:/logs
     depends_on:
       - remote
-    # No ports. No vault. No docker socket. It talks to /ask and to Telegram,
-    # and that is the entire blast radius if it is ever compromised.
+      - whisper
+      - piper
+    # No ports. No vault. No docker socket. It talks to /ask, to whisper and
+    # piper for voice, and to Telegram — that is the entire blast radius if it
+    # is ever compromised.
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -366,7 +382,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128m
+          # 256m rather than 128m since ffmpeg landed: a short Opus transcode
+          # is small but not free, and being OOM-killed mid-voice-note would
+          # look like the bridge randomly ignoring people.
+          memory: 256m
 
   # Real WebDAV over the notes vault, so Obsidian can sync it from a phone and
   # a laptop. nginx's dav module does PUT and DELETE but NOT PROPFIND, which is

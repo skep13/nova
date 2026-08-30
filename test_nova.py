@@ -39,7 +39,11 @@ def check(group, name, fn, slow=False):
         ok, detail = fn()
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {str(exc)[:120]}"
-    results.append((group, name, bool(ok), f"{detail}  [{time.time()-started:.1f}s]"))
+    # None is preserved, not coerced: a test may report not-applicable, which
+    # is neither a pass nor a failure. An engine that rate-limited us is not a
+    # defect in Nova, and counting it as one teaches everybody to ignore red.
+    results.append((group, name, None if ok is None else bool(ok),
+                    f"{detail}  [{time.time()-started:.1f}s]"))
 
 
 def curl(path, method="GET", data=None, form=None, timeout=30, raw=False):
@@ -378,6 +382,55 @@ def t_bridge_isolated():
     return not bad, "; ".join(bad) or "no vault, no other keys"
 
 
+def t_bridge_voice():
+    """The whole voice path except the Telegram upload itself.
+
+    Piper speaks a sentence, ffmpeg encodes the OGG/Opus that Telegram would
+    carry, ffmpeg decodes it back to the 16 kHz mono WAV whisper wants, and
+    whisper reads it. Four links, and a break in any one of them looks
+    identical from the outside: the bot silently ignores voice notes.
+
+    Asserted on word overlap rather than an exact string. base.en is allowed to
+    punctuate differently; it is not allowed to lose the sentence.
+    """
+    said = "the backup ran nine hours ago and every service is responding"
+    script = f'''
+import json, pathlib, subprocess, tempfile, urllib.request
+said = {said!r}
+def http(url, data=None, headers=None):
+    return urllib.request.urlopen(
+        urllib.request.Request(url, data=data, headers=headers or {{}}), timeout=180)
+with tempfile.TemporaryDirectory() as d:
+    d = pathlib.Path(d)
+    wav = http("http://piper:5000/synthesize", json.dumps({{"text": said}}).encode(),
+               {{"Content-Type": "application/json"}}).read()
+    (d/"a.wav").write_bytes(wav)
+    for args in (["-i", str(d/"a.wav"), "-c:a", "libopus", "-b:a", "32k", "-f", "ogg", str(d/"b.ogg")],
+                 ["-i", str(d/"b.ogg"), "-ar", "16000", "-ac", "1", "-f", "wav", str(d/"c.wav")]):
+        r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error"] + args, capture_output=True)
+        if r.returncode:
+            raise SystemExit("ffmpeg: " + r.stderr.decode()[:200])
+    b = "----novavoice"
+    payload = (f"--{{b}}\\r\\n"
+               'Content-Disposition: form-data; name="file"; filename="s.wav"\\r\\n'
+               "Content-Type: audio/wav\\r\\n\\r\\n").encode() + (d/"c.wav").read_bytes() + \\
+        (f"\\r\\n--{{b}}\\r\\n"
+         'Content-Disposition: form-data; name="response_format"\\r\\n\\r\\njson\\r\\n'
+         f"--{{b}}--\\r\\n").encode()
+    out = http("http://whisper:8080/inference", payload,
+               {{"Content-Type": f"multipart/form-data; boundary={{b}}"}})
+    print(json.loads(out.read().decode()).get("text", "").strip())
+'''
+    r = subprocess.run(["docker", "exec", "nova-bridge", "python3", "-c", script],
+                       capture_output=True, text=True, timeout=300)
+    heard = r.stdout.strip()
+    if not heard:
+        return False, f"no transcription: {r.stderr.strip()[:120]}"
+    norm = lambda s: set("".join(c for c in s.lower() if c.isalnum() or c == " ").split())
+    hit = len(norm(said) & norm(heard)) / max(1, len(norm(said)))
+    return hit >= 0.8, f"{hit:.0%} of the sentence survived: {heard[:60]!r}"
+
+
 def t_bridge_default_deny():
     """An unset allowlist must mean nobody, never everybody.
 
@@ -398,9 +451,15 @@ def t_bridge_default_deny():
 
 # -------------------------------------------------------------- research ---
 def t_research_floor():
-    return code_of("/research", "POST",
-                   {"q": "blorp glimf wuzzle", "agent": "fast"}, timeout=120) == "404", \
-        "nonsense is refused rather than written up"
+    # Reports the code it actually got. The old message read "nonsense is
+    # refused rather than written up" whether it passed or failed, which is
+    # exactly as useful as saying nothing: an intermittent failure here gave no
+    # clue whether the answer was a 200, a 500 or an empty string from a
+    # timeout, and standalone runs would not reproduce it.
+    code = code_of("/research", "POST",
+                   {"q": "blorp glimf wuzzle", "agent": "fast"}, timeout=120)
+    return code == "404", (f"nonsense refused with {code}" if code == "404"
+                           else f"expected 404, got {code!r}")
 
 
 def t_research_archive():
@@ -411,6 +470,45 @@ def t_research_archive():
 
 
 def t_research_web():
+    """Research something the offline archive cannot know, from the live web.
+
+    Distinguishes "our code is broken" from "the engines said no", because they
+    are not the same finding and only one of them is actionable here.
+
+    The free general engines rate-limit and CAPTCHA server-side traffic, and
+    this suite is itself the load: every full run researches something live, so
+    a handful of runs in a day exhausts them. That is a fact about public
+    search engines, not a defect in Nova, and failing the build for it trains
+    everyone to ignore a red suite.
+
+    Returning None rather than False marks it not-applicable, so the reason is
+    still printed and the count stays honest in both directions: this is not a
+    pass either.
+    """
+    # Measures the condition that actually matters — the web returns nothing —
+    # rather than naming the engines expected to be dead. An earlier version
+    # required all four of brave, duckduckgo, google cse and startpage to be
+    # listed unresponsive, so a run where one had recovered but still answered
+    # nothing failed instead of being marked not-applicable.
+    # Asked from INSIDE the docker network. This suite runs in the LXC, where
+    # "searxng" does not resolve — the first version of this probe therefore
+    # got nothing every time and skipped unconditionally, which is worse than
+    # the failure it was meant to explain: a test that never runs reports
+    # green forever.
+    try:
+        probe = json.loads(subprocess.run(
+            ["docker", "exec", "orb-remote", "python3", "-c",
+             "import urllib.request,sys;"
+             "sys.stdout.write(urllib.request.urlopen("
+             "'http://searxng:8080/search?q=nginx+reverse+proxy&format=json',"
+             "timeout=40).read().decode())"],
+            capture_output=True, text=True, timeout=60).stdout or "{}")
+    except Exception:
+        probe = {}
+    if not probe.get("results"):
+        dead = ", ".join(sorted(e[0] for e in probe.get("unresponsive_engines", [])))
+        return None, f"the web returned nothing; engines refusing: {dead or 'unknown'}"
+
     evs, text = sse("/research", {"q": "what is the uv python package manager",
                                   "title": "uv test", "agent": "fast", "web": True}, 300)
     note = next((e["orb_note"] for e in evs if "orb_note" in e), None)
@@ -594,7 +692,8 @@ GROUPS = [
               ("whole turn via /ask", t_ask, True),
               ("follows a thread", t_ask_history, True),
               ("bridge is isolated", t_bridge_isolated, False),
-              ("bridge denies by default", t_bridge_default_deny, False)]),
+              ("bridge denies by default", t_bridge_default_deny, False),
+              ("bridge voice round trip", t_bridge_voice, True)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),
@@ -631,7 +730,9 @@ def main():
             last = group
         if ok is None:
             skipped += 1
-            print(f"    SKIP  {name}")
+            # The reason matters: "skipped" alone hides whether it was --quick
+            # or an outside service refusing, and those need different actions.
+            print(f"    SKIP  {name:34} {detail}")
         elif ok:
             passed += 1
             print(f"    pass  {name:34} {detail}")
