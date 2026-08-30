@@ -75,6 +75,26 @@ HISTORY_TURNS = 6
 HAVE_FFMPEG = bool(shutil.which("ffmpeg"))
 
 
+def log(msg):
+    """Say what happened, on stdout, where docker logs will keep it.
+
+    This file logged NOTHING for its first day, and the first real failure was
+    consequently undiagnosable from the outside: the bot read messages and said
+    nothing, and there was no way to tell whether an update had even arrived.
+    Silence is a fine reply to a stranger; it is a terrible operational record.
+
+    Never logs message text or the token. Chat ids and outcomes only — enough
+    to see the shape of what happened without keeping a copy of the
+    conversation on disk.
+    """
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}", flush=True)
+
+
+def _norm_code(s):
+    """Codes compared on their words, ignoring case and punctuation."""
+    return "".join(c for c in (s or "").lower() if c.isalnum())
+
+
 def token():
     """The bot token, read at use rather than held in a module global.
 
@@ -142,7 +162,13 @@ def try_enrol(chat, text):
     state = load_state()
     if not ENROL_CODE or state.get("enrol_used"):
         return None
-    if text.strip() != ENROL_CODE:
+    # Normalised, not compared raw. A phone keyboard autocapitalises the first
+    # letter of a message, so "Nova-cedar-..." never matched "nova-cedar-..."
+    # and the only symptom was silence — the bot appearing to read messages and
+    # ignore them. Case and stray punctuation carry no entropy here; the words
+    # do. Being strict about them bought nothing and cost the whole feature.
+    if _norm_code(text) != _norm_code(ENROL_CODE):
+        log(f"enrolment refused for chat {chat}: code did not match")
         return None
     enrolled = set(state.get("enrolled", []))
     enrolled.add(chat)
@@ -365,9 +391,17 @@ async def handle(session, msg):
         if not rate_ok(chat):
             return
         reply = try_enrol(chat, text)
-        # Silence otherwise, not an explanation. An unknown sender who is told
-        # a code exists has been told what to try next.
-        return await send(session, chat, reply) if reply else None
+        if reply:
+            log(f"enrolled chat {chat}")
+            return await send(session, chat, reply)
+        # A bare refusal rather than silence. The original reasoning — that
+        # saying nothing tells a stranger nothing — was right about codes and
+        # wrong about everything else: it also tells the OWNER nothing, and an
+        # assistant that reads your message and does not respond is
+        # indistinguishable from one that is broken. This reveals no more than
+        # the fact they already have, which is that the bot exists.
+        log(f"refused chat {chat}: not on the allowlist")
+        return await send(session, chat, "Not authorised.")
 
     if not rate_ok(chat):
         return await send(session, chat, "Too many messages. Give me a minute.")
@@ -394,6 +428,9 @@ async def handle(session, msg):
 async def poll():
     """Long poll for updates. Outbound only; nothing listens here."""
     offset = None
+    log(f"bridge up: token={'yes' if token() else 'no'} "
+        f"allowed={len(allowed())} enrol_code={'set' if ENROL_CODE else 'unset'} "
+        f"ffmpeg={'yes' if HAVE_FFMPEG else 'no'}")
     async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_read=90)) as session:
         asyncio.create_task(watch_health(session))
@@ -416,10 +453,24 @@ async def poll():
                 await asyncio.sleep(5)
                 continue
 
+            if data.get("result"):
+                log(f"{len(data['result'])} update(s)")
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
                 msg = upd.get("message") or upd.get("edited_message") or {}
-                asyncio.create_task(handle(session, msg))
+                # Wrapped, because an exception inside a bare create_task is
+                # swallowed by the event loop and vanishes. That is how a
+                # handler could fail on every message while the bridge looked
+                # perfectly healthy from the outside.
+                asyncio.create_task(guarded(session, msg))
+
+
+async def guarded(session, msg):
+    try:
+        await handle(session, msg)
+    except Exception as exc:
+        chat = str((msg.get("chat") or {}).get("id", "?"))
+        log(f"handler failed for chat {chat}: {type(exc).__name__}: {exc}")
 
 
 if __name__ == "__main__":
