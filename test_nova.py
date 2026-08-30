@@ -374,7 +374,11 @@ def t_ingest_rejects_empty():
 def t_vault_links():
     import pathlib, re
     V = pathlib.Path("/opt/orb/mem")
-    fence = re.compile(r"```.*?```", re.S)
+    # Obsidian does not parse a wikilink inside a fenced block OR inside inline
+    # backticks, so neither counts as a link. Stripping only fences reported the
+    # markdown reference note as broken for documenting the syntax correctly —
+    # the note was right and the check was wrong.
+    fence = re.compile(r"```.*?```|`[^`\n]*`", re.S)
     stems = {p.stem for p in V.glob("*.md")}
     bad = 0
     for p in V.glob("*.md"):
