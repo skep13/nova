@@ -7,8 +7,12 @@ FROM python:3.11-slim
 # slim image. Telegram speaks OGG/Opus at both ends, whisper.cpp wants 16 kHz
 # mono WAV, and Piper returns WAV — so something has to transcode. The bridge
 # degrades to text-only if it is ever absent rather than failing outright.
+# tzdata comes along for the clock. The container runs UTC by default and the
+# user is on BST, so "remind me at 7pm" would have fired at 8pm their time and
+# the 07:30 brief was already arriving at 08:30. A clock quietly an hour out is
+# worse than no clock, because nothing looks wrong.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
+ && apt-get install -y --no-install-recommends ffmpeg tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir aiohttp

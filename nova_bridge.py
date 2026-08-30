@@ -66,6 +66,9 @@ HELP = (
     "make a note called X saying Y - writes it into Obsidian\n"
     "add Y to my X note - appends to one that exists\n"
     "is X in my notes - checked against the actual files\n"
+    "remind me in 20 minutes to X / remind me at 7pm to X\n"
+    "timer for 10 minutes\n"
+    "reminders - what is set; cancel 3; cancel all\n"
     "reset - forget this conversation\n\n"
     "Voice notes work. Send one and you get one back."
 )
@@ -300,6 +303,167 @@ async def send_voice(session, chat, text):
                 await r.read()
         except Exception:
             return
+
+
+# --- reminders and timers ----------------------------------------------------
+#
+# Parsed, not modelled. "in twenty minutes" and "at half seven" are a small
+# regular grammar, and the failure modes of getting them wrong are the worst
+# kind: a reminder that silently never fires is indistinguishable from one that
+# was never set, and the user finds out by missing the thing.
+#
+# So the clock is arithmetic and the only thing the model would have been asked
+# for — what the reminder is ABOUT — is just the rest of the sentence.
+_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+          "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+          "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+          "d": 86400, "day": 86400, "days": 86400,
+          "w": 604800, "week": 604800, "weeks": 604800}
+
+_WORD_NUMBERS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
+    "forty-five": 45, "fortyfive": 45, "sixty": 60, "half": 0.5,
+}
+
+# "in" and "for" both: a reminder is set "in 20 minutes" and a timer is set
+# "for 10 minutes", and both are the same arithmetic.
+_IN = re.compile(
+    r"\b(?:in|for)\s+(\d+|" + "|".join(sorted(_WORD_NUMBERS, key=len, reverse=True)) +
+    r")\s*(" + "|".join(sorted(_UNITS, key=len, reverse=True)) + r")\b", re.I)
+
+_AT = re.compile(r"\bat\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b", re.I)
+
+# Matched separately and removed before the time is parsed, rather than being
+# an optional group on either side of it. As part of _AT it had to be written
+# twice, the trailing copy never fired because the preceding \s* had already
+# eaten its space, and "at 8 tomorrow" became eight tonight with the word
+# "tomorrow" left sitting in the reminder text.
+_TOMORROW = re.compile(r"\btomorrow\b", re.I)
+
+_REMIND = re.compile(
+    r"^\s*(?:can you\s+|please\s+)*(?:remind me|set a reminder|reminder)\b(.*)$", re.I)
+_TIMER = re.compile(
+    r"^\s*(?:can you\s+|please\s+)*(?:set (?:a|an)\s+|start (?:a|an)\s+)?timer\b(.*)$",
+    re.I)
+_LIST_REM = re.compile(r"^\s*(?:reminders|timers|list reminders|what.s set)\s*[?.]?\s*$", re.I)
+_CANCEL = re.compile(r"^\s*cancel\s+(?:reminder\s+)?(\d+|all)\s*$", re.I)
+
+
+def parse_when(text, now=None):
+    """(epoch, remaining_text) for a time phrase, or (None, text).
+
+    Handles "in 20 minutes" and "at 7pm", with "tomorrow" on either side of the
+    time. An "at" time that has already passed today rolls to tomorrow, because
+    someone saying "remind me at 7" at nine in the evening does not mean two
+    minutes ago and does not mean never.
+    """
+    now = now or time.time()
+
+    tomorrow = bool(_TOMORROW.search(text))
+    if tomorrow:
+        text = _TOMORROW.sub(" ", text)
+
+    m = _IN.search(text)
+    if m:
+        raw, unit = m.group(1).lower(), m.group(2).lower()
+        n = float(raw) if raw.isdigit() else _WORD_NUMBERS.get(raw, 0)
+        if n <= 0:
+            return None, text
+        return now + n * _UNITS[unit], (text[:m.start()] + " " + text[m.end():]).strip()
+
+    m = _AT.search(text)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2) or 0)
+        ampm = (m.group(3) or "").lower()
+        if hour > 23 or minute > 59:
+            return None, text
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        # No am/pm and an hour that has already gone today is read as the
+        # evening: "remind me at 7" said at lunchtime means seven tonight, not
+        # tomorrow morning.
+        #
+        # Not when tomorrow was said, though. "tomorrow at 8" means eight in
+        # the morning, and shifting it by today's clock turned it into eight at
+        # night — the reminder arrives, twelve hours late, which is the failure
+        # that looks least like a failure.
+        lt = time.localtime(now)
+        assume_pm = (not ampm and not tomorrow and hour < 12
+                     and (lt.tm_hour, lt.tm_min) > (hour, minute)
+                     and hour + 12 > lt.tm_hour)
+        if assume_pm:
+            hour += 12
+        target = list(lt)
+        target[3], target[4], target[5] = hour, minute, 0
+        when = time.mktime(time.struct_time(tuple(target)))
+        if tomorrow or when <= now:
+            when += 86400
+        return when, (text[:m.start()] + " " + text[m.end():]).strip()
+
+    return None, text
+
+
+def clean_task(text):
+    """The reminder itself, with the connecting words taken off the front."""
+    t = re.sub(r"^\s*(?:to|that|about|it.s|its)\b\s*", "", text.strip(), flags=re.I)
+    t = re.sub(r"\s{2,}", " ", t).strip(" ,.;:")
+    return t
+
+
+def add_reminder(chat, when, what):
+    state = load_state()
+    rems = state.get("reminders", [])
+    rid = max([r.get("id", 0) for r in rems], default=0) + 1
+    rems.append({"id": rid, "chat": str(chat), "at": when, "what": what})
+    state["reminders"] = rems
+    save_state(state)
+    return rid
+
+
+def when_words(when):
+    """"in 20 minutes" reads better than a timestamp for anything soon."""
+    delta = when - time.time()
+    if delta < 3600:
+        return f"in {max(1, round(delta / 60))} minutes"
+    stamp = time.strftime("%H:%M", time.localtime(when))
+    if time.strftime("%Y-%m-%d", time.localtime(when)) == time.strftime("%Y-%m-%d"):
+        return f"at {stamp}"
+    return f"at {stamp} on {time.strftime('%a %d %b', time.localtime(when))}"
+
+
+async def watch_reminders(session):
+    """Fire anything due, then forget it.
+
+    Persisted to disk rather than held in memory, so a restart does not quietly
+    drop everything anyone set. Checked every fifteen seconds: a reminder that
+    arrives a quarter-minute late is fine, one that arrives after a redeploy is
+    not.
+    """
+    while True:
+        try:
+            state = load_state()
+            rems = state.get("reminders", [])
+            now = time.time()
+            due = [r for r in rems if r.get("at", 0) <= now]
+            if due:
+                for r in due:
+                    await send(session, r["chat"], f"Reminder: {r['what']}")
+                    log(f"reminder {r['id']} fired for chat {r['chat']}")
+                # Re-read before writing: watch_health and watch_brief also
+                # write this file, and clobbering their keys would re-announce
+                # the health state or re-send the morning brief.
+                state = load_state()
+                keep = [r for r in state.get("reminders", [])
+                        if r.get("id") not in {d["id"] for d in due}]
+                state["reminders"] = keep
+                save_state(state)
+        except Exception as exc:
+            log(f"reminder sweep failed: {type(exc).__name__}: {exc}")
+        await asyncio.sleep(15)
 
 
 # --- weather, and the morning brief -----------------------------------------
@@ -654,6 +818,42 @@ async def answer(session, chat, text, spoken=False):
     if _WEATHER.match(text):
         return await send(session, chat, await weather_line(session))
 
+    if _LIST_REM.match(text):
+        rems = sorted((r for r in load_state().get("reminders", [])
+                       if r["chat"] == str(chat)), key=lambda r: r["at"])
+        if not rems:
+            return await send(session, chat, "Nothing set.")
+        return await send(session, chat, "\n".join(
+            f"{r['id']}. {r['what']} — {when_words(r['at'])}" for r in rems))
+
+    m = _CANCEL.match(text)
+    if m:
+        state = load_state()
+        rems = state.get("reminders", [])
+        target = m.group(1).lower()
+        mine = [r for r in rems if r["chat"] == str(chat)]
+        # Only ever this chat's own. The allowlist can hold more than one.
+        drop = mine if target == "all" else [r for r in mine
+                                             if str(r["id"]) == target]
+        if not drop:
+            return await send(session, chat, "Nothing matching that.")
+        state["reminders"] = [r for r in rems if r not in drop]
+        save_state(state)
+        return await send(session, chat, f"Cancelled {len(drop)}.")
+
+    m = _REMIND.match(text) or _TIMER.match(text)
+    if m:
+        rest = m.group(1)
+        when, remainder = parse_when(rest)
+        if not when:
+            return await send(session, chat,
+                              "When? Say \"in 20 minutes\" or \"at 7pm\".")
+        what = clean_task(remainder) or "timer"
+        rid = add_reminder(chat, when, what)
+        log(f"reminder {rid} set for chat {chat}")
+        return await send(session, chat,
+                          f"Right — {what}, {when_words(when)}. (#{rid})")
+
     # Checked BEFORE the note-writing gate: see the note on ordering above.
     if _NOTE_CHECK.search(text):
         try:
@@ -781,6 +981,7 @@ async def poll():
             timeout=aiohttp.ClientTimeout(total=None, sock_read=90)) as session:
         asyncio.create_task(watch_health(session))
         asyncio.create_task(watch_brief(session))
+        asyncio.create_task(watch_reminders(session))
         while True:
             tok = token()
             if not tok:

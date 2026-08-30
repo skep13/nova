@@ -29,37 +29,71 @@ outgoing:
   max_request_timeout: 12.0
   pool_connections: 10
 
+# Chosen by measurement, not by reputation.
+#
+# The four general engines this started with — duckduckgo, brave, startpage and
+# google — ALL refuse a self-hosted client, and they refuse together, so the
+# whole web path died at once rather than degrading. Every one of them was
+# picked because it is well known, which turns out to be the reason: the better
+# known the engine, the harder it works to keep servers out.
+#
+# So each candidate was asked the same question from this box and kept only if
+# it answered. Measured 2026-08-30, on "wireguard site to site tunnel":
+#
+#   bing        10   ok            duckduckgo   0   CAPTCHA
+#   mwmbl       22   ok            brave        0   suspended, too many requests
+#   yandex      15   ok            startpage    0   CAPTCHA
+#   seznam      10   ok            google       0   CAPTCHA
+#   wiby         8   ok            qwant        0   CAPTCHA
+#   github      20   ok            yep          0   access denied
+#   arxiv       10   ok            mojeek       0   empty
+#
+# Mojeek is the interesting failure and the reason this is a table rather than
+# a guess. Fetching mojeek.com directly from this container returns 200 and 19
+# KB, so it is reachable and willing — SearXNG's own module for it yields
+# nothing. It stays disabled: an engine that always returns empty is pure
+# latency, and the fault is not one this repo can fix.
+#
+# The four that CAPTCHA are LEFT ENABLED. They cost nothing while suspended,
+# they are the best results when they do answer, and their suspensions expire.
+# They are simply no longer the only thing holding the feature up.
 engines:
-  # Engines that answer without an API key and do not aggressively block
-  # server-side traffic. Wikipedia is included deliberately even though the
-  # archive is local: it is how we notice the local copy has gone stale.
-  - name: wikipedia
+  # Answering as of the measurement above.
+  - name: bing
     disabled: false
+  - name: mwmbl              # open, independent index
+    disabled: false
+  - name: seznam             # Czech, runs its own index
+    disabled: false
+  - name: wiby               # small and curated; thin, but never refuses
+    disabled: false
+  # Russian, and works well. Flagged rather than hidden: it is a data source
+  # like any other here, and if that is not wanted it is one line to remove.
+  - name: yandex
+    disabled: false
+
+  # Kept, because a suspension is temporary and these are the best results when
+  # they come back.
   - name: duckduckgo
     disabled: false
   - name: brave
     disabled: false
   - name: startpage
     disabled: false
-  # Added after all four general engines refused at once — brave and google cse
-  # suspended for "too many requests", duckduckgo and startpage on CAPTCHA —
-  # which took the whole web-research path down rather than degrading it.
-  #
-  # The cause was the test suite: every full run researches something live, and
-  # six runs in a day is enough to exhaust the free tolerance of engines that
-  # are only tolerating server traffic in the first place.
-  #
-  # Mojeek and Marginalia run their own indexes rather than proxying somebody
-  # else's, so they have no reason to CAPTCHA a self-hosted client. They are
-  # smaller and will not replace the big four on breadth; the point is that
-  # something still answers when the big four are sulking.
+
+  # Measurably broken through SearXNG despite the site itself working.
   - name: mojeek
-    disabled: false
-  - name: marginalia
-    disabled: false
+    disabled: true
+
+  # Specialist, and the reason programming research survived the outage: none
+  # of these ever refused while every general engine was down.
   - name: github
     disabled: false
   - name: stackoverflow
     disabled: false
   - name: arxiv
+    disabled: false
+  # Included even though the archive is local: it is how a stale local copy
+  # gets noticed.
+  - name: wikipedia
     disabled: false

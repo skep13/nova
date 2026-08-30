@@ -497,6 +497,79 @@ def t_bridge_routes():
     return not bad, "; ".join(bad) or f"{len(cases)} phrasings routed correctly"
 
 
+def t_reminder_times():
+    """Every phrasing lands on the hour it should, against a fixed clock.
+
+    Time parsing is where the silent failures live: a reminder set for the
+    wrong hour never announces itself, and the user finds out by missing the
+    thing. Four of these were wrong on the first pass — "tomorrow at 8" became
+    eight at night, and "timer for 10 minutes" found no time at all because the
+    pattern only knew the word "in".
+
+    Pinned against a fixed now, so this does not pass or fail by the hour it is
+    run at.
+    """
+    cases = [("remind me in 20 minutes to take the bread out", "Sun 14:20", "take the bread out"),
+             ("remind me in an hour to check the oven", "Sun 15:00", "check the oven"),
+             ("remind me at 7pm to put the bins out", "Sun 19:00", "put the bins out"),
+             ("remind me at 9am to book the mot", "Mon 09:00", "book the mot"),
+             ("remind me at 7 to eat", "Sun 19:00", "eat"),
+             ("remind me tomorrow at 8 to ring the vet", "Mon 08:00", "ring the vet"),
+             ("remind me at 8 tomorrow to ring the vet", "Mon 08:00", "ring the vet"),
+             ("timer for 10 minutes", "Sun 14:10", ""),
+             ("set a timer for 90 seconds", "Sun 14:01", ""),
+             ("remind me in 3 days to chase the invoice", "Wed 14:00", "chase the invoice")]
+    script = (
+        "import sys, time, json; sys.path.insert(0, '/app'); import nova_bridge as B\n"
+        "NOW = time.mktime((2026, 8, 30, 14, 0, 0, 6, 242, -1))\n"
+        "out = []\n"
+        f"for text, _, _ in {cases!r}:\n"
+        "    m = B._REMIND.match(text) or B._TIMER.match(text)\n"
+        "    if not m:\n"
+        "        out.append(['no match', '']); continue\n"
+        "    when, rest = B.parse_when(m.group(1), now=NOW)\n"
+        "    if when is None:\n"
+        "        out.append(['no time', '']); continue\n"
+        "    out.append([time.strftime('%a %H:%M', time.localtime(when)),\n"
+        "                B.clean_task(rest)])\n"
+        "print(json.dumps(out))")
+    res = subprocess.run(["docker", "exec", "nova-bridge", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60)
+    if not res.stdout.strip():
+        return False, f"could not run: {res.stderr.strip()[:110]}"
+    got = json.loads(res.stdout)
+    bad = [f"{t!r}->{g[0]} {g[1]!r}"
+           for (t, wt, wk), g in zip(cases, got) if [wt, wk] != g]
+    return not bad, "; ".join(bad)[:150] or f"{len(cases)} phrasings parsed correctly"
+
+
+def t_reminder_fires():
+    """Set one, watch it go off, confirm it is gone afterwards.
+
+    The parser test proves the arithmetic; this proves the loop reads the file,
+    sends, and removes. A reminder that fires forever is worse than one that
+    never fires.
+    """
+    script = (
+        "import sys, time, json; sys.path.insert(0, '/app'); import nova_bridge as B\n"
+        "rid = B.add_reminder('__suite__', time.time() + 3, 'suite probe')\n"
+        "print(rid)")
+    rid = subprocess.run(["docker", "exec", "nova-bridge", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    if not rid:
+        return False, "could not add a reminder"
+    time.sleep(25)
+    left = subprocess.run(
+        ["docker", "exec", "nova-bridge", "python3", "-c",
+         "import sys, json; sys.path.insert(0, '/app'); import nova_bridge as B;"
+         "print(json.dumps([r['id'] for r in B.load_state().get('reminders', [])]))"],
+        capture_output=True, text=True, timeout=60).stdout.strip()
+    still = json.loads(left or "[]")
+    return int(rid) not in still, (f"reminder {rid} fired and was cleared"
+                                   if int(rid) not in still
+                                   else f"reminder {rid} is still pending")
+
+
 def t_bridge_isolated():
     """The Telegram bridge's blast radius, asserted rather than assumed.
 
@@ -838,7 +911,9 @@ GROUPS = [
               ("note write and append", t_note_write, False),
               ("note titles are not paths", t_note_traversal, False),
               ("short notes are findable", t_notes_search, False),
-              ("sentence becomes a note", t_note_from_text, True)]),
+              ("sentence becomes a note", t_note_from_text, True),
+              ("reminder times parse", t_reminder_times, False),
+              ("a reminder fires and clears", t_reminder_fires, True)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),

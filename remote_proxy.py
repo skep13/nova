@@ -1764,8 +1764,44 @@ async def gather_sources(question, use_web=False):
     if use_web:
         # Web sources are ADDED, not substituted. The archive is more reliable
         # where it has an answer; the web is for where it does not.
-        articles = articles[:1] + await gather_web(question)
+        articles = articles[:1] + relevant_to(question, await gather_web(question))
     return vault_hit, articles
+
+
+def relevant_to(question, articles):
+    """Drop web results that have nothing to do with the question.
+
+    The relevance floor used to be "were any sources found at all", which held
+    only while the search engines were refusing us. With them working again,
+    "blorp glimf wuzzle" came back with results — engines always return
+    something — and the endpoint dutifully wrote a note about nothing. A search
+    engine answering is not the same as an answer existing.
+
+    Title OR body, unlike the archive test above which demands the title. A web
+    page about setting up a VPN can be legitimately called "WireGuard Quick
+    Start" and share no word with the question, so requiring the title here
+    would throw away good sources to catch nonsense. The body is enough:
+    genuine results discuss the terms asked about, and invented words appear
+    nowhere.
+
+    Two terms, not one. One shared word is coincidence at web scale: engines
+    return something for any string, and among the junk for "blorp glimf
+    wuzzle" was a page containing one of them, which passed a single-term test
+    and let the endpoint write the note anyway — intermittently, so it looked
+    like flakiness rather than a rule that was too weak. A real question offers
+    several terms and its real answers carry most of them.
+    """
+    q_terms = {_stem(w) for w in key_terms(question)}
+    if not q_terms:
+        return articles
+    need = min(2, len(q_terms))
+    keep = []
+    for a in articles:
+        hay = {_stem(w) for w in key_terms(
+            (a.get("title") or "") + " " + (a.get("text") or "")[:2000])}
+        if len(q_terms & hay) >= need:
+            keep.append(a)
+    return keep
 
 
 def research_prompt(question, vault_hit, articles):

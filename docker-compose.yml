@@ -357,6 +357,10 @@ services:
       - NOVA_TG_ENROL=${NOVA_TG_ENROL:-nova-cedar-rowan-delta-umber-9346}
       - NOVA_TG_PER_MIN=12
       - NOVA_HEALTH_EVERY=300
+      # Everything with a clock in it depends on this: the morning brief, every
+      # reminder, and the date a brief was last sent. The container is UTC
+      # without it, which is an hour out for half the year and looks fine.
+      - TZ=${NOVA_TZ:-Europe/London}
       # Voice notes: 2 minutes in, and past ~700 characters a reply is text
       # only. Piper on two cores is not quick, and nobody wants a four-minute
       # voice note read at them.
