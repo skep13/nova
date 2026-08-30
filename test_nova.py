@@ -570,6 +570,53 @@ def t_reminder_fires():
                                    else f"reminder {rid} is still pending")
 
 
+def t_closing_offer_stripped():
+    """The stock sign-off is deleted, and real questions are not.
+
+    The persona forbids these by name and the model still reaches for one now
+    and then — zero in eighteen replies, then straight back on the nineteenth.
+    Sampling is sampling, so the closed set of phrasings is removed after the
+    fact rather than asked about more firmly.
+    """
+    script = (
+        "import sys, json; sys.path.insert(0, '/app'); import remote_proxy as R\n"
+        "cases = ['I am fine. What can I help with today?',\n"
+        "         'It is owner-only. How can I help you?',\n"
+        "         'Done. Is there anything else you need?',\n"
+        "         'Rain later. Let me know if you want the hourly.',\n"
+        "         'I do not know. Which version are you on?',\n"
+        "         'That depends. Are you using systemd?']\n"
+        "print(json.dumps([R.strip_closing_offer(c) for c in cases]))")
+    out = subprocess.run(["docker", "exec", "orb-remote", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    if not out:
+        return False, "could not reach the router"
+    got = json.loads(out)
+    want = ["I am fine.", "It is owner-only.", "Done.", "Rain later.",
+            "I do not know. Which version are you on?",
+            "That depends. Are you using systemd?"]
+    bad = [f"{g!r}" for g, w in zip(got, want) if g != w]
+    return not bad, "; ".join(bad)[:130] or "4 sign-offs cut, 2 real questions kept"
+
+
+def t_notes_question_words():
+    """"is X in my notes" must not search for a note called "notes".
+
+    The whole question was passed to the matcher, which required every word in
+    the title — so a note called "suite check", written seconds earlier, came
+    back as not found because its title does not contain the word "notes".
+    """
+    import random
+    title = f"framing check {random.randint(10000, 99999)}"
+    a = jpost("/note", {"title": title, "body": "- x"}, timeout=60) or {}
+    asked = f"is {title} in my obsidian notes"
+    hits = (jget(f"/notes?q={urllib.parse.quote(asked)}", timeout=60) or {}).get("hits", [])
+    subprocess.run(["rm", "-f", f"/opt/orb/mem/{a.get('file', 'x')}"],
+                   capture_output=True)
+    return bool(hits), ("found through the question framing" if hits
+                        else "the framing words hid the note")
+
+
 def t_bridge_isolated():
     """The Telegram bridge's blast radius, asserted rather than assumed.
 
@@ -820,26 +867,42 @@ def t_wiki():
 
 
 def t_tts_stt():
+    """Piper makes audio, and whisper reads a FIXED recording exactly.
+
+    This test used to synthesise a sentence and transcribe it, asserting an
+    exact substring, on the stated reasoning that whisper is deterministic.
+    Whisper is. PIPER IS NOT — measured: the same text three times gave three
+    different files of 64044, 66092 and 68652 bytes, while the same audio gave
+    whisper the identical transcript five times out of five.
+
+    So the round trip was measuring Piper's noise scale and blaming whisper,
+    and it failed the suite roughly one run in five with "grade reference",
+    "greed reference" and "grid of reference". Worse, it was measuring the
+    wrong thing entirely: in use a PERSON speaks, and Piper is nowhere in the
+    input path.
+
+    Now the two are separated. Piper only has to produce audio. Whisper is
+    asked to read a recording committed alongside this file, so the assertion
+    is exact and deterministic — which is the right bar, because this phrase
+    feeds RE_WHERE, a regex command that a mis-hearing does not degrade but
+    loses outright.
+    """
     n = subprocess.run(["curl", "-s", "-m", "60", "-X", "POST", BASE + "/tts",
                         "-H", "Content-Type: application/json",
-                        # A whole sentence, because that is what a person says
-                        # and because whisper uses the surrounding words. The
-                        # bare fragment "grid reference" is transcribed as
-                        # "create reference" every time; inside this sentence it
-                        # is correct. Testing the fragment measured an input the
-                        # interface never receives.
                         "-d", json.dumps({"text": "what is my grid reference"}),
-                        "-o", "/tmp/_t.wav", "-w", "%{size_download}"],
+                        "-o", "/dev/null", "-w", "%{size_download}"],
                        capture_output=True, text=True).stdout
     if int(n or 0) < 1000:
         return False, f"tts produced {n} bytes"
+
+    ref = "/opt/orb/test-audio/grid-reference.wav"
+    if not pathlib.Path(ref).exists():
+        return False, f"reference recording missing at {ref}"
     out = subprocess.run(["curl", "-s", "-m", "120", "-X", "POST", BASE + "/stt",
-                          "-F", "file=@/tmp/_t.wav", "-F", "response_format=json"],
+                          "-F", f"file=@{ref}", "-F", "response_format=json"],
                          capture_output=True, text=True).stdout
     heard = json.loads(out).get("text", "").strip().lower()
-    # No retry: whisper is deterministic, so the same audio gives the same
-    # answer and a second attempt only measures the clock.
-    return "grid reference" in heard, f"heard {heard!r}"
+    return "grid reference" in heard, f"tts {n} bytes; heard {heard!r}"
 
 
 def t_webdav():
@@ -913,7 +976,9 @@ GROUPS = [
               ("short notes are findable", t_notes_search, False),
               ("sentence becomes a note", t_note_from_text, True),
               ("reminder times parse", t_reminder_times, False),
-              ("a reminder fires and clears", t_reminder_fires, True)]),
+              ("a reminder fires and clears", t_reminder_fires, True),
+              ("closing offer stripped", t_closing_offer_stripped, False),
+              ("note question framing", t_notes_question_words, False)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),

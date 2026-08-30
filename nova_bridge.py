@@ -944,7 +944,19 @@ async def answer(session, chat, text, spoken=False):
                               f"{out['body']}")
         if out.get("error"):
             return await send(session, chat, f"I couldn't: {out['error']}")
-        # Fell through to a normal answer: it did not read as a note request.
+        # "NONE" means the sentence merely mentioned a note — "note that TLS
+        # 1.3 dropped renegotiation" is not a request to write one — so it
+        # falls through to a normal answer.
+        #
+        # Anything else means it WAS a note request and the title and body
+        # could not be pulled out of it, usually because several requests were
+        # stacked in one sentence. That is a known state with a useful reply,
+        # and handing it to the model instead produced "I don't know."
+        if (out.get("raw") or "").strip().upper() != "NONE":
+            return await send(session, chat,
+                              "I can see you want a note, but not what to call "
+                              "it. Try: make a note called X saying Y. One "
+                              "thing at a time works best.")
 
     m = _RESEARCH.match(text)
     if m:
