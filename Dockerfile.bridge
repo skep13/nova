@@ -1,0 +1,16 @@
+# Telegram bridge: long-polls for messages, relays them to /ask, and pushes
+# alerts back out. Outbound connections only — nothing listens on a port here,
+# which is the whole reason this is Telegram and not a WhatsApp webhook.
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir aiohttp
+
+COPY nova_bridge.py /app/nova_bridge.py
+WORKDIR /app
+
+ENV NOVA_ASK_URL=http://remote:5003/ask \
+    NOVA_HEALTH_URL=http://remote:5003/health \
+    TG_KEY=/run/keys/telegram.key \
+    BRIDGE_STATE=/logs/bridge-state.json
+
+CMD ["python", "nova_bridge.py"]

@@ -5,6 +5,9 @@ FROM python:3.11-slim
 RUN pip install --no-cache-dir aiohttp
 
 COPY remote_proxy.py /app/remote_proxy.py
+# Nova's character. Extracted from index.html rather than retyped, and asserted
+# identical to the browser's copy by test_nova.py.
+COPY persona.py /app/persona.py
 WORKDIR /app
 
 ENV LOCAL_URL=http://llama:8080/v1/chat/completions \

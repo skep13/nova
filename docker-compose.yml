@@ -320,6 +320,54 @@ services:
           # a bisect and a few hundred haversines rather than a file read.
           memory: 256m
 
+  # Nova over Telegram: reachable when the page is not open, and able to speak
+  # first when something breaks. Long polling, so nothing is published and
+  # Tailscale Funnel stays off — which matters here because the WebDAV vault
+  # below is served unauthenticated by request.
+  #
+  # Enrolment is two steps and neither is done for you:
+  #   1. Get a token from @BotFather, then on the Proxmox host:
+  #        install -m 700 -d /opt/orb/keys/bridge
+  #        (paste token) > /opt/orb/keys/bridge/telegram.key   # umask 077
+  #   2. Message the bot once. It refuses and replies with your chat id.
+  #      Put that id in NOVA_TG_ALLOW below and recreate this service.
+  #
+  # Without a token it waits quietly; with a token and an empty allowlist it
+  # answers nobody. Both are the safe failure.
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    image: nova-bridge:latest
+    container_name: nova-bridge
+    restart: unless-stopped
+    environment:
+      # Numeric chat ids, comma separated. Empty means nobody: a bot username
+      # is discoverable and anyone may message it, so default-deny is the only
+      # safe reading of an unset variable. An open bot would hand a stranger an
+      # assistant with the whole personal vault attached.
+      - NOVA_TG_ALLOW=${NOVA_TG_ALLOW:-}
+      - NOVA_TG_PER_MIN=12
+      - NOVA_HEALTH_EVERY=300
+    volumes:
+      # Only the bridge's own key, in its own directory. Mounting ./keys here
+      # would hand the Telegram relay every model provider key as well, and it
+      # has no business with any of them.
+      - ./keys/bridge:/run/keys:ro
+      - ./logs:/logs
+    depends_on:
+      - remote
+    # No ports. No vault. No docker socket. It talks to /ask and to Telegram,
+    # and that is the entire blast radius if it is ever compromised.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
   # Real WebDAV over the notes vault, so Obsidian can sync it from a phone and
   # a laptop. nginx's dav module does PUT and DELETE but NOT PROPFIND, which is
   # what a WebDAV client needs to list a directory — the existing /mem/ endpoint

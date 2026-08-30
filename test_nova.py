@@ -65,6 +65,14 @@ def jget(path, timeout=30):
     return json.loads(curl(path, timeout=timeout))
 
 
+def jpost(path, body, timeout=60):
+    out = curl(path, "POST", data=body, timeout=timeout)
+    try:
+        return json.loads(out)
+    except Exception:
+        return None
+
+
 def recall(q, timeout=40):
     out = subprocess.run(
         ["curl", "-s", "-m", str(timeout), "--get", "--data-urlencode", f"q={q}",
@@ -279,6 +287,115 @@ def t_stem_plurals():
     return not bad, "; ".join(bad) or f"{len(pairs)} singular/plural pairs meet"
 
 
+# ------------------------------------------------------------------ nova ---
+def t_persona_no_drift():
+    """The page's persona and the server's must be the same personality.
+
+    They are two copies of the same ~2 KB of prompt: the browser assembles its
+    own turn, and nova_turn assembles one for every other caller. Nothing stops
+    someone editing one and not the other, and the failure is invisible — Nova
+    simply sounds slightly different over the bridge than she does on the wrist,
+    and no error is ever raised. So it is asserted rather than hoped for.
+    """
+    sys.path.insert(0, "/opt/orb")
+    try:
+        import extract_persona
+        import persona
+    except Exception as exc:
+        return False, f"cannot import: {type(exc).__name__}: {exc}"
+
+    html = open("/opt/orb/index.html", encoding="utf-8").read()
+    blocks, fewshot = extract_persona.parse(html)
+    bad = [n for n in extract_persona.BLOCKS if getattr(persona, n, None) != blocks[n]]
+    if persona.FEWSHOT != fewshot:
+        bad.append(f"FEWSHOT ({len(persona.FEWSHOT)} vs {len(fewshot)} turns)")
+    return not bad, ("drifted: " + ", ".join(bad)) if bad else \
+        f"{len(extract_persona.BLOCKS)} blocks + {len(fewshot)} turns identical"
+
+
+def t_ask():
+    """A whole turn through /ask: character, vault lookup and an answer.
+
+    Asserts the vault was actually consulted, not just that a reply came back.
+    A model this size will answer chmod from its own weights and sound
+    confident doing it, so a plausible answer proves nothing about retrieval.
+    """
+    out = jpost("/ask", {"q": "what does chmod 600 mean"}, timeout=280)
+    if not out:
+        return False, "no response"
+    answer = (out.get("answer") or "").strip()
+    if not answer:
+        return False, f"empty answer (agent={out.get('agent')})"
+    if out.get("source") != "chmod and Unix file permissions":
+        return False, f"wrong note attached: {out.get('source')!r}"
+    return True, f"{len(answer)} chars, grounded in {out['source']!r}"
+
+
+def t_ask_history():
+    """Follow-up questions need the previous turns or they are unanswerable.
+
+    "and for a directory?" means nothing on its own. If history were dropped,
+    the reply would still be fluent and would be about something else entirely,
+    which is the failure mode worth catching.
+    """
+    out = jpost("/ask", {
+        "q": "and what about 644?",
+        "history": [{"role": "user", "content": "what does chmod 600 mean"},
+                    {"role": "assistant",
+                     "content": "It sets a file readable and writable only by "
+                                "its owner."}]}, timeout=280)
+    if not out:
+        return False, "no response"
+    answer = (out.get("answer") or "").lower()
+    # 644 is owner read/write, everyone else read. Any correct answer says so.
+    if not any(w in answer for w in ("read", "readable")):
+        return False, f"did not follow the thread: {answer[:90]!r}"
+    return True, f"followed up: {answer[:70]!r}"
+
+
+def t_bridge_isolated():
+    """The Telegram bridge's blast radius, asserted rather than assumed.
+
+    It relays messages from the open internet, so it is the most exposed thing
+    here and the first place an injection would land. It must not be able to
+    read the vault (a personal note archive), and it must not see the model
+    provider keys — mounting ./keys wholesale is the easy mistake, and it would
+    hand a Telegram relay every API key on the box.
+    """
+    def inside(cmd):
+        return subprocess.run(["docker", "exec", "nova-bridge", "sh", "-c", cmd],
+                              capture_output=True, text=True, timeout=30)
+
+    if inside("true").returncode != 0:
+        return False, "nova-bridge is not running"
+    bad = []
+    if inside("ls /mem").returncode == 0:
+        bad.append("can read the vault")
+    keys = [k for k in inside("ls -A /run/keys").stdout.split()
+            if k != "telegram.key"]
+    if keys:
+        bad.append("sees other keys: " + ", ".join(keys))
+    return not bad, "; ".join(bad) or "no vault, no other keys"
+
+
+def t_bridge_default_deny():
+    """An unset allowlist must mean nobody, never everybody.
+
+    A bot username is discoverable and anyone can message it. If an empty
+    NOVA_TG_ALLOW were read as "no restriction", a stranger would get Nova with
+    the whole vault attached, and nothing would look broken.
+    """
+    script = ("import os, importlib, sys; sys.path.insert(0, '/app');"
+              "os.environ['NOVA_TG_ALLOW'] = '';"
+              "import nova_bridge; importlib.reload(nova_bridge);"
+              "print(len(nova_bridge.ALLOW))")
+    out = subprocess.run(["docker", "exec", "nova-bridge", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=30).stdout.strip()
+    if out != "0":
+        return False, f"empty allowlist parsed as {out!r} entries"
+    return True, "an empty allowlist authorises nobody"
+
+
 # -------------------------------------------------------------- research ---
 def t_research_floor():
     return code_of("/research", "POST",
@@ -473,6 +590,11 @@ GROUPS = [
                    ("new domains", t_recall_new_domains, False),
                    ("reference notes", t_recall_reference, False),
                    ("stem plurals", t_stem_plurals, False)]),
+    ("nova", [("persona has not drifted", t_persona_no_drift, False),
+              ("whole turn via /ask", t_ask, True),
+              ("follows a thread", t_ask_history, True),
+              ("bridge is isolated", t_bridge_isolated, False),
+              ("bridge denies by default", t_bridge_default_deny, False)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),
