@@ -61,7 +61,7 @@ HELP = (
     "Ask me anything and I'll answer from your vault or what I know.\n\n"
     "status - how I am, checked rather than guessed\n"
     "weather - current conditions where you are\n"
-    "set location <place> - where that is, and where the morning brief is for\n"
+    "set location <postcode or town> - for weather and the morning brief\n"
     "research <topic> - the vault, the offline encyclopedia, then the web\n"
     "make a note called X saying Y - writes it into Obsidian\n"
     "add Y to my X note - appends to one that exists\n"
@@ -506,8 +506,59 @@ def describe(code):
     return "unsettled"
 
 
+# A UK postcode is how a British person says where they live, and Open-Meteo's
+# geocoder indexes settlements — it returns nothing at all for "SW1A 1AA". So
+# postcodes go to postcodes.io instead: free, no key, no account, and the
+# authoritative source rather than a guess.
+#
+# Both halves optional-spaced, and the outcode alone accepted, because "SW1A" is
+# a perfectly good answer to where are you and is less precise by nature.
+_UK_POSTCODE = re.compile(r"^\s*([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})?\s*$", re.I)
+
+
+async def geocode_postcode(session, text):
+    """UK postcode to coordinates, or None if it is not one."""
+    m = _UK_POSTCODE.match(text)
+    if not m:
+        return None
+    out, inn = m.group(1).upper(), (m.group(2) or "").upper()
+    url = (f"https://api.postcodes.io/postcodes/{out}{inn}" if inn
+           else f"https://api.postcodes.io/outcodes/{out}")
+    try:
+        async with session.get(url) as r:
+            if r.status != 200:
+                return None
+            d = (await r.json()).get("result") or {}
+    except Exception:
+        return None
+    lat, lon = d.get("latitude"), d.get("longitude")
+    if lat is None or lon is None:
+        return None
+    # str for a full postcode, LIST for an outcode — an outcode spans several
+    # districts and postcodes.io says so by changing the type of the field.
+    #
+    # Taking the first of the list is how "SW1A" came back labelled
+    # "Herefordshire, England" for a Welsh postcode: it does straddle the
+    # border, and the first entry is not the answer, it is just first. When the
+    # list disagrees with itself the honest label is no label.
+    def one(v):
+        if isinstance(v, list):
+            distinct = {x for x in v if x}
+            return distinct.pop() if len(distinct) == 1 else None
+        return v
+
+    where = ", ".join(x for x in (one(d.get("admin_district")),
+                                  one(d.get("country"))) if x)
+    # Rounded to about a kilometre before it is stored. A full postcode locates
+    # a handful of houses; a forecast does not vary across one, so keeping the
+    # exact figure would be recording precision the feature cannot use.
+    return {"lat": round(lat, 2), "lon": round(lon, 2),
+            "label": f"{out}{' ' + inn if inn else ''}"
+                     + (f" ({where})" if where else "")}
+
+
 async def geocode(session, place):
-    """A place name to coordinates, or None.
+    """A place name or UK postcode to coordinates, or None.
 
     Retries on the part before the first comma. Open-Meteo matches a single
     place name and returns nothing at all for "Keswick, Cumbria" — which is how
@@ -519,6 +570,10 @@ async def geocode(session, place):
     it away. So the retry asks for ten and prefers one whose region or country
     contains the words that were dropped.
     """
+    postcode = await geocode_postcode(session, place)
+    if postcode:
+        return postcode
+
     head, _, qualifier = place.partition(",")
     qualifier = qualifier.strip().lower()
 
@@ -582,7 +637,8 @@ async def weather_line(session, brief=False):
         # A town, not a postcode: Open-Meteo's geocoder indexes settlements and
         # returns nothing for a UK postcode, so asking for one would be asking
         # for the input most likely to fail.
-        return "I don't know where you are. Say: set location <town>."
+        return ("I don't know where you are. Say: set location "
+                "<postcode or town>.")
     try:
         async with session.get(FORECAST_URL, params={
                 "latitude": loc["lat"], "longitude": loc["lon"],
