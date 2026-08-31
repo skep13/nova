@@ -703,6 +703,46 @@ def t_notes_question_words():
                         else "the framing words hid the note")
 
 
+def t_rain_looks_ahead():
+    """The forecast reports the hours to come, not the ones already gone.
+
+    It said "100% chance of rain" on a bright morning, every morning. The
+    figure was Open-Meteo's precipitation_probability_max, which is the maximum
+    across the whole CALENDAR day and so includes the night that has already
+    happened: it had rained at midnight, and every remaining hour of that day
+    was between zero and four per cent.
+
+    Honestly reported and consistently wrong, which is the worst kind — a
+    forecast nobody believes is worse than no forecast at all.
+    """
+    day = "2026-08-31"
+    fixtures = [
+        # hours, "now", must say, must not say
+        ([("00:00", 100), ("11:00", 2), ("14:00", 3), ("20:00", 0)],
+         "11:00", "dry", "100"),
+        ([("00:00", 100), ("11:00", 2), ("16:00", 75), ("20:00", 5)],
+         "11:00", "16:00", "100"),
+        # 45% is a risk, not a promise; calling it "likely" is how a forecast
+        # stops being believed.
+        ([("11:00", 5), ("15:00", 45)], "11:00", "possible", "likely"),
+    ]
+    bad = []
+    for hours, at, want, unwanted in fixtures:
+        payload = {"time": [f"{day}T{h}" for h, _ in hours],
+                   "precipitation_probability": [p for _, p in hours]}
+        script = (
+            "import sys, json; sys.path.insert(0, '/app'); import nova_bridge as B\n"
+            f"print(json.dumps(B.rain_ahead({payload!r}, now='{day}T{at}')))")
+        out = subprocess.run(["docker", "exec", "nova-bridge", "python3", "-c", script],
+                             capture_output=True, text=True, timeout=60).stdout.strip()
+        if not out:
+            return False, "could not reach the bridge"
+        said = json.loads(out).lower()
+        if want not in said or unwanted in said:
+            bad.append(f"at {at}: {said!r}")
+    return not bad, "; ".join(bad)[:150] or "3 fixtures report only the hours ahead"
+
+
 def t_bridge_isolated():
     """The Telegram bridge's blast radius, asserted rather than assumed.
 
@@ -1066,7 +1106,8 @@ GROUPS = [
               ("closing offer stripped", t_closing_offer_stripped, False),
               ("note question framing", t_notes_question_words, False),
               ("opening filler stripped", t_opening_filler_stripped, False),
-              ("knows the time of day", t_knows_the_time, False)]),
+              ("knows the time of day", t_knows_the_time, False),
+              ("rain forecast looks ahead", t_rain_looks_ahead, False)]),
     ("research", [("relevance floor", t_research_floor, True),
                   ("from the archive", t_research_archive, True),
                   ("from the web", t_research_web, True)]),

@@ -643,9 +643,11 @@ async def weather_line(session, brief=False):
         async with session.get(FORECAST_URL, params={
                 "latitude": loc["lat"], "longitude": loc["lon"],
                 "current": "temperature_2m,apparent_temperature,weather_code",
-                "daily": "temperature_2m_max,temperature_2m_min,"
-                         "precipitation_probability_max,weather_code",
-                "forecast_days": 1, "timezone": "auto"}) as r:
+                # Hourly, because the daily figure is the wrong question — see
+                # rain_ahead below.
+                "hourly": "precipitation_probability",
+                "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+                "forecast_days": 2, "timezone": "auto"}) as r:
             d = await r.json()
     except Exception as exc:
         return f"I couldn't reach the forecast ({type(exc).__name__})."
@@ -655,21 +657,58 @@ async def weather_line(session, brief=False):
     feels = cur.get("apparent_temperature")
     hi = (day.get("temperature_2m_max") or [None])[0]
     lo = (day.get("temperature_2m_min") or [None])[0]
-    wet = (day.get("precipitation_probability_max") or [None])[0]
-    sky = describe((day.get("weather_code") or [cur.get("weather_code", 0)])[0])
+    # The CURRENT code, not the day's. The daily code summarises midnight to
+    # midnight, so a wet night made a bright afternoon read as "drizzle".
+    sky = describe(cur.get("weather_code", 0))
 
-    bits = [f"{loc['label']}: {now_c:.0f} degrees" if now_c is not None
-            else f"{loc['label']}:"]
+    bits = [f"{loc['label']}: {now_c:.0f} degrees, {sky}" if now_c is not None
+            else f"{loc['label']}: {sky}"]
     # Only when it disagrees with the real temperature by enough to matter —
     # "3 degrees, feels like 3" is noise.
     if feels is not None and now_c is not None and abs(feels - now_c) >= 2:
         bits.append(f"feels like {feels:.0f}")
     if hi is not None and lo is not None:
-        bits.append(f"{lo:.0f} to {hi:.0f} today, {sky}")
-    if wet is not None:
-        bits.append(f"{wet:.0f}% chance of rain")
-    line = ", ".join(bits) + "."
+        bits.append(f"{lo:.0f} to {hi:.0f} today")
+    line = ", ".join(bits) + ". " + rain_ahead(d.get("hourly") or {})
     return ("Morning. " + line) if brief else line
+
+
+def rain_ahead(hourly, hours=12, now=None):
+    """Chance of rain in the hours STILL TO COME, and roughly when.
+
+    This used to be Open-Meteo's precipitation_probability_max, which is the
+    maximum across the whole calendar day — INCLUDING hours already gone. At
+    half eleven on a bright morning it reported "100% chance of rain" because
+    it had rained at midnight, and every remaining hour of that day was between
+    zero and four per cent. Reported honestly, and consistently wrong.
+
+    A forecast is about the future. So the hours before now are dropped and the
+    peak of what is left is what gets said, with the hour it falls in, because
+    "60% at four" is a different afternoon from "60% at ten tonight".
+    """
+    times = hourly.get("time") or []
+    probs = hourly.get("precipitation_probability") or []
+    if not times or len(times) != len(probs):
+        return ""
+
+    # now is injectable so this can be tested against fixed hours. Reaching for
+    # the wall clock inside made the only interesting cases — "it rained at
+    # midnight and it is now noon" — untestable except at midnight and noon.
+    now = now or time.strftime("%Y-%m-%dT%H:00")
+    ahead = [(t, p) for t, p in zip(times, probs) if t >= now and p is not None]
+    if not ahead:
+        return ""
+    ahead = ahead[:hours]
+
+    peak_t, peak = max(ahead, key=lambda x: x[1])
+    if peak < 15:
+        return "Dry for the next few hours."
+    when = peak_t[11:16]
+    # "Rain" only once it is likelier than not; below that it is a risk, and
+    # saying rain for a 30% chance is how a forecast stops being believed.
+    word = "Rain likely" if peak >= 60 else "Rain possible" if peak >= 40 \
+        else "Small chance of rain"
+    return f"{word} around {when}, {peak:.0f}%."
 
 
 def _plus_minutes(hhmm, minutes):

@@ -1,0 +1,13 @@
+[Unit]
+# Runs after the console exists, or setterm has nothing to write to.
+Description=Keep the laptop panel powered down (headless server)
+After=getty@tty1.service systemd-logind.service
+Wants=getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nova-display-off.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
