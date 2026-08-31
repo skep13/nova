@@ -743,6 +743,42 @@ def t_rain_looks_ahead():
     return not bad, "; ".join(bad)[:150] or "3 fixtures report only the hours ahead"
 
 
+def t_two_voices():
+    """Nova and Marina are different characters, and the caller picks.
+
+    Nova answers on the web: direct, no emoji, a capable colleague. Marina
+    answers on Telegram: warm, dry, a friend, and she signs soft messages with
+    a heart. Same machine, same vault, deliberately different people.
+
+    Asserted on the prompts rather than on generated replies, because a model
+    is sampled and two warm answers in a row would not prove the wiring while
+    two terse ones would not disprove it. If the selection ever breaks, both
+    surfaces quietly get whichever persona is the default — which reads as a
+    personality change nobody asked for and nothing would report.
+    """
+    script = (
+        "import sys, json; sys.path.insert(0, '/app')\n"
+        "import persona, persona_marina\n"
+        "print(json.dumps({'nova': persona.PERSONA, 'marina': persona_marina.PERSONA}))")
+    out = subprocess.run(["docker", "exec", "orb-remote", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    if not out:
+        return False, "could not load both personas"
+    p = json.loads(out)
+    heart = chr(0x1FA75)
+    problems = []
+    if p["nova"] == p["marina"]:
+        problems.append("both voices are the same text")
+    if heart not in p["marina"]:
+        problems.append("Marina has lost her heart")
+    if heart in p["nova"]:
+        problems.append("Nova has an emoji and must not")
+    if "marina" not in p["marina"].lower():
+        problems.append("Marina does not name herself")
+    return not problems, "; ".join(problems) or (
+        f"nova {len(p['nova'])} chars, marina {len(p['marina'])} chars, distinct")
+
+
 def t_bridge_isolated():
     """The Telegram bridge's blast radius, asserted rather than assumed.
 
@@ -1091,6 +1127,7 @@ GROUPS = [
                    ("reference notes", t_recall_reference, False),
                    ("stem plurals", t_stem_plurals, False)]),
     ("nova", [("persona has not drifted", t_persona_no_drift, False),
+              ("two distinct voices", t_two_voices, False),
               ("whole turn via /ask", t_ask, True),
               ("follows a thread", t_ask_history, True),
               ("bridge is isolated", t_bridge_isolated, False),

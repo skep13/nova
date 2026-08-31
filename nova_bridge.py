@@ -1047,8 +1047,11 @@ async def answer(session, chat, text, spoken=False):
         await send(session, chat, f"Looking into {topic}. This takes a minute.")
         return await research(session, chat, topic, spoken)
 
-    body = {"q": text, "history": [{"role": r, "content": c}
-                                   for r, c in _history.get(chat, [])]}
+    # Marina, not Nova. Same machine, same vault, different character:
+    # Nova is the web assistant and Marina is who answers here.
+    body = {"q": text, "voice": "marina",
+            "history": [{"role": r, "content": c}
+                        for r, c in _history.get(chat, [])]}
     try:
         async with session.post(ASK_URL, json=body,
                                 timeout=aiohttp.ClientTimeout(total=None,

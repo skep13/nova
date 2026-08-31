@@ -39,6 +39,7 @@ from aiohttp import web
 
 # Nova's character, shared with the page rather than retyped here.
 import persona
+import persona_marina
 
 LOCAL_URL = os.environ.get("LOCAL_URL", "http://llama:8080/v1/chat/completions")
 KEY_DIR = pathlib.Path(os.environ.get("KEY_DIR", "/run/keys"))
@@ -2476,7 +2477,7 @@ NOTE_FRAMING = (
 
 
 async def nova_turn(question, history=(), agent_name="local", persona_on=True,
-                    max_tokens=600):
+                    max_tokens=600, voice="nova"):
     """Ask Nova something and get her answer, with all her faculties attached.
 
     history is [(role, content), ...] oldest first, already trimmed by the
@@ -2486,7 +2487,15 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
     if not question:
         return {"answer": "", "agent": None, "source": None}
 
-    system = (persona.PERSONA if persona_on else persona.PLAIN) + persona.CORE_RULES
+    # Two characters, one machine. Nova answers on the web — direct, no emoji,
+    # a capable colleague. Marina answers on Telegram — warm, dry, a friend.
+    # That split is deliberate, so the voice is chosen by the CALLER rather
+    # than being a single personality that has to suit both.
+    #
+    # CORE_RULES is shared: it governs output shape, not character, and applies
+    # wherever a reply might be read aloud.
+    voice_persona = persona_marina.PERSONA if voice == "marina" else persona.PERSONA
+    system = (voice_persona if persona_on else persona.PLAIN) + persona.CORE_RULES
     if persona_on:
         system += "\n\n" + ASK_CAPABILITIES
     # Always, persona or not: the time is a fact about the world rather than a
@@ -2557,7 +2566,10 @@ async def ask(request):
     out = await nova_turn(question, history=history,
                           agent_name=payload.get("agent", "local") or "local",
                           persona_on=payload.get("persona", True),
-                          max_tokens=int(payload.get("max_tokens", 600)))
+                          max_tokens=int(payload.get("max_tokens", 600)),
+                          # Defaults to nova, so an existing caller that
+                          # knows nothing about voices keeps the web one.
+                          voice=(payload.get("voice") or "nova").lower())
     return web.json_response(out)
 
 

@@ -14,6 +14,10 @@ COPY remote_proxy.py /app/remote_proxy.py
 # Nova's character. Extracted from index.html rather than retyped, and asserted
 # identical to the browser's copy by test_nova.py.
 COPY persona.py /app/persona.py
+# Marina, the Telegram character. Hand-written rather than extracted: the
+# browser never sends her, so she is not in index.html and does not get
+# downloaded to a phone that has no use for her.
+COPY persona_marina.py /app/persona_marina.py
 WORKDIR /app
 
 ENV LOCAL_URL=http://llama:8080/v1/chat/completions \
