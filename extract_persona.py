@@ -47,9 +47,19 @@ def strip_comments(js):
 
 
 def js_strings(js):
-    """Every single-quoted literal, in order, unescaped."""
+    """Every single-quoted literal, in order, unescaped.
+
+    \\u{...} is handled because the persona contains one emoji and the page
+    must not. This project's no-pictograph test scans the SERVED HTML, and the
+    persona lives inside it — so a literal heart in the character sheet put a
+    literal heart in the page and failed the test, correctly. Written as an
+    escape it is absent from the source and present in the string the model
+    receives, which is what both sides actually want.
+    """
     out = []
     for lit in re.findall(r"'((?:[^'\\]|\\.)*)'", js):
+        lit = re.sub(r"\\u\{([0-9A-Fa-f]+)\}",
+                     lambda m: chr(int(m.group(1), 16)), lit)
         out.append(lit.replace("\\n", "\n").replace("\\'", "'")
                       .replace('\\"', '"').replace("\\\\", "\\"))
     return out

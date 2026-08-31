@@ -272,10 +272,21 @@ async def voice_to_text(session, file_id):
     return (out.get("text") or "").strip() or None
 
 
+_EMOJI = re.compile(
+    "[\U0001F000-\U0001FAFF☀-➿←-⇿️⬀-⯿]")
+
+
 async def send_voice(session, chat, text):
-    """Speak a reply. Best effort — the text has already been sent."""
+    """Speak a reply. Best effort — the text has already been sent.
+
+    Emoji are stripped first. Nova signs soft messages with a heart, which is
+    right in writing and meaningless out loud — Piper either skips it or makes
+    a noise of it, and neither is what the character meant. The written copy
+    keeps it; only the spoken one loses it.
+    """
     tok = token()
-    if not (tok and HAVE_FFMPEG) or len(text) > MAX_SPEAK_CHARS:
+    text = _EMOJI.sub("", text).strip()
+    if not (tok and HAVE_FFMPEG) or not text or len(text) > MAX_SPEAK_CHARS:
         return
     try:
         async with session.post(TTS_URL, json={"text": text}) as r:

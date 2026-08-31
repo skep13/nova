@@ -2403,6 +2403,13 @@ _CLOSING_OFFER = re.compile(
     r"|is\s+there\s+anything\s+else\b[^.!?]*"
     r"|let\s+me\s+know\s+if\s+you\s+(?:need|want|have)\s+"
     r"(?:anything|any\s+(?:more|other|further))\b[^.!?]*"
+    # Bare "just let me know" with nothing after it. The version above only
+    # caught it when it named "anything else", so "If you need anything, just
+    # let me know" survived by splitting the same sentiment across two clauses.
+    # A "let me know" that goes on to name a specific thing — the hourly
+    # forecast, whether it worked — is still kept by the alternation order.
+    r"|(?:and\s+|so\s+)?(?:just\s+)?let\s+me\s+know\s*"
+    r"|if\s+you\s+need\s+anything[^.!?]*"
     r"|feel\s+free\s+to\s+(?:ask|reach)\s+(?:me\s+)?(?:anything|any\s?time|if)\b[^.!?]*"
     r"|(?:i'?m\s+)?(?:happy|glad)\s+to\s+help\b[^.!?]*"
     r")[.!?]*\s*$", re.I)
