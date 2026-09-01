@@ -2464,7 +2464,47 @@ _SELF_DISCLAIMER = re.compile(
     r"views?|beliefs?)\b[^.!?]*?(?:[,.]?\s*but\s+|[.!?]\s*)", re.I)
 
 
+# A bare acknowledgement at the front of a reply. "Got it. How did it go?" is
+# not wrong, but the "Got it" is a receipt bolted to the answer and it is what
+# makes her read as a machine taking a ticket. Removed only when something
+# follows; a reply that is nothing BUT the acknowledgement keeps it, since an
+# empty message is worse.
+_OPENING_RECEIPT = re.compile(
+    r"^\s*(?:got it|i see|understood|noted|sure thing|okay then|alright then|"
+    r"very well|acknowledged)\b[,.!]*\s+(?=\S)", re.I)
+
+# Disclaiming being a model, ANYWHERE in the reply rather than only at the
+# start. Asked why she was cold, three prompt-level fixes later, she still
+# produced "I am a model, a program. I have no temperature." — to the person
+# who wrote her.
+#
+# This is a strong prior in the base model that instruction has not held
+# against, so the sentence is removed instead. Whole sentences only, and never
+# the last thing standing.
+#
+# Two shapes, because it comes in two. A whole sentence — "I am a model, a
+# program." — and a clause tucked inside one, as in "I'm fine, just a model."
+# Removing the sentence in the second case would take "I'm fine" with it, so
+# the clause is cut on its own and the sentence around it survives.
+_MODEL_DISCLAIMER = re.compile(
+    r"(?:^|(?<=[.!?]))\s*[^.!?]*\bi\s*(?:'m|\s+am)\s+(?:just\s+|only\s+|merely\s+)?"
+    r"(?:an?\s+)?(?:ai|a\s+model|model|language\s+model|program|programme|bot|"
+    r"machine|piece\s+of\s+software)\b[^.!?]*[.!?]+", re.I)
+
+_MODEL_CLAUSE = re.compile(
+    r",\s*(?:just|only|merely|being)\s+(?:an?\s+)?"
+    r"(?:ai|model|language\s+model|program|programme|bot|machine)\b", re.I)
+
+
+def strip_model_disclaimer(text):
+    cleaned = _MODEL_CLAUSE.sub("", text or "")
+    cleaned = _MODEL_DISCLAIMER.sub(" ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned or (text or "").strip()
+
+
 def strip_opening_praise(text):
+    text = _OPENING_RECEIPT.sub("", text or "", count=1)
     cleaned = _OPENING_PRAISE.sub("", text or "", count=1).strip()
     cleaned = _SELF_DISCLAIMER.sub("", cleaned, count=1).strip()
     if cleaned and cleaned[0].islower():
@@ -2472,8 +2512,26 @@ def strip_opening_praise(text):
     return cleaned or (text or "").strip()
 
 
+# The same empty offers, matched as whole sentences ANYWHERE rather than only
+# at the end. "If you need anything, just let me know. Have a good rest." put
+# the offer first and sailed past an end-anchored pattern; so did a bare
+# "Anything else?" tacked on after a real answer.
+_OFFER_SENTENCE = re.compile(
+    r"(?:^|(?<=[.!?]))\s*[^.!?]*?\b(?:"
+    r"(?:how|what)\s+(?:can|may|else\s+can)\s+i\s+(?:help|assist|do)"
+    r"|is\s+there\s+(?:anything|something)\s+(?:else|specific|particular)"
+    r"|anything\s+else\??"
+    r"|if\s+you\s+need\s+anything"
+    r"|(?:just\s+)?let\s+me\s+know(?!\s+if\s+(?:you\s+)?(?:want|the|it))"
+    r"|glad\s+to\s+help|happy\s+to\s+help"
+    r"|have\s+a\s+good\s+(?:rest|night|one)"
+    r")\b[^.!?]*[.!?]*", re.I)
+
+
 def strip_closing_offer(text):
     cleaned = _CLOSING_OFFER.sub("", text or "").strip()
+    cleaned = _OFFER_SENTENCE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     # Never return nothing: if the whole reply was the offer, the offer is the
     # only answer there is and a blank message is worse.
     return cleaned or (text or "").strip()
@@ -2581,7 +2639,7 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
         answer, used = await complete(s, agent, messages, max_tokens,
                                       temperature=0.6)
 
-    answer = strip_closing_offer(strip_opening_praise(answer))
+    answer = strip_closing_offer(strip_model_disclaimer(strip_opening_praise(answer)))
     log_exchange(question, answer, used, agent.get("model") or "")
     return {"answer": answer, "agent": used,
             "source": hit["title"] if hit else None}
