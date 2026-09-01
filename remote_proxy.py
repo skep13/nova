@@ -841,7 +841,7 @@ def load_vault(force=False):
                 # "about" joins "moc" here: it is injected on every turn
                 # already, and as a search result it would displace the note
                 # that answers with a list of things he once mentioned.
-                if re.search(r"^tags:.*\b(?:moc|about)\b", fm.group(1), re.M):
+                if re.search(r"^tags:.*\b(?:moc|about|diary)\b", fm.group(1), re.M):
                     continue
             h = re.search(r"^#\s+(.+)$", body, re.M)
             if not title and h:
@@ -2499,6 +2499,141 @@ async def remember_about(question, answer):
         print(f"remembered: {log_line}", flush=True)
 
 
+# --- what was actually talked about ------------------------------------------
+#
+# The facts file holds what he IS. This holds what has been HAPPENING: a short
+# note per day of what he was working on and asking about, so "did the cable
+# ever give in?" works on Wednesday about Monday.
+#
+# Without it every conversation starts cold. The bridge keeps six turns in RAM
+# and loses them on restart, so she has never once known what yesterday was —
+# and remembering the conversation is most of what being known feels like.
+#
+# SUMMARISED FROM HIS SIDE ONLY, which is the design decision that matters.
+# Her own answers are excluded from the source text, because this afternoon the
+# fact extractor read her replies and wrote "chmod 600 means the file is
+# readable and writable only by the owner" into the memory as a fact about him
+# — and worse, wrote down a time she had invented. His questions are ground
+# truth; her answers are the thing that can be wrong. Summarising only what he
+# said makes laundering a hallucination structurally impossible rather than
+# merely discouraged.
+DIARY_DAYS = 5                 # how many days are put in front of her
+DIARY_MAX = 700                # characters per day
+
+
+def diary_path(day):
+    return VAULT_DIR / f"diary-{day}.md"
+
+
+def read_diary(days=DIARY_DAYS):
+    """Recent day-notes, oldest first."""
+    out = []
+    for d in sorted(VAULT_DIR.glob("diary-*.md"))[-days:]:
+        body = d.read_text(encoding="utf-8", errors="replace")
+        text = body.split("---", 2)[-1].strip()
+        # Drop the heading line; the date is in the label already.
+        text = re.sub(r"^#.*$", "", text, count=1, flags=re.M).strip()
+        if text:
+            out.append((d.stem.replace("diary-", ""), text[:DIARY_MAX]))
+    return out
+
+
+def diary_context():
+    entries = read_diary()
+    if not entries:
+        return ""
+    today = datetime.date.today()
+    lines = []
+    for day, text in entries:
+        try:
+            delta = (today - datetime.date.fromisoformat(day)).days
+        except Exception:
+            delta = None
+        when = ("today" if delta == 0 else "yesterday" if delta == 1
+                else f"{delta} days ago" if delta is not None else day)
+        lines.append(f"{when} ({day}): {text}")
+    return ("What you have talked about recently. Refer back to it the way a "
+            "friend would — naturally, and only when it fits. Do not recite it, "
+            "and do not claim anything happened that is not written here.\n"
+            + "\n".join(lines))
+
+
+DIARY_PROMPT = (
+    "Below are the questions and remarks one person sent an assistant during a "
+    "day. Write two or three plain sentences saying what he was working on and "
+    "what he was asking about. Third person, past tense.\n\n"
+    "Only what is actually in the messages. No times, durations or outcomes "
+    "unless he stated them. Do not say whether anything was solved. Do not "
+    "invent detail. If the day was only trivia, say so briefly."
+)
+
+
+async def summarise_day(day, agent_name="local"):
+    """Write one day's note from the exchange log. Returns the text, or None."""
+    folder = LOG_DIR / day
+    if not folder.is_dir():
+        return None
+
+    # HIS side only — the "# heading" line of each exchange log is the question
+    # he asked. The answers are deliberately not read.
+    asked = []
+    for f in sorted(folder.glob("*.md")):
+        head = f.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r"^#\s+(.+)$", head, re.M)
+        if m:
+            asked.append(m.group(1).strip())
+    if len(asked) < 2:
+        return None
+
+    messages = [{"role": "system", "content": DIARY_PROMPT},
+                {"role": "user", "content": "\n".join(f"- {a}" for a in asked[-60:])}]
+    try:
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None, sock_read=600)) as s:
+            text, _ = await complete(s, BY_NAME.get(agent_name, BY_NAME["local"]),
+                                     messages, 220, temperature=0.2)
+    except Exception:
+        return None
+
+    text = (text or "").strip()[:DIARY_MAX]
+    if len(text) < 20:
+        return None
+
+    doc = ("---\n"
+           f"created: {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+           f"title: Diary {day}\n"
+           # Excluded from retrieval like the facts file: it is injected every
+           # turn, and as a search hit it would displace real answers.
+           "tags: [diary, nova]\n"
+           "---\n\n"
+           f"# {day}\n\n{text}\n\n"
+           "Written by Nova from that day's questions. Edit or delete it — it "
+           "is read as written.\n")
+    try:
+        diary_path(day).write_text(doc, encoding="utf-8")
+        global _vault_stamp
+        _vault_stamp = -1.0
+    except Exception:
+        return None
+    return text
+
+
+async def diary_write(request):
+    payload = await request.json()
+    day = (payload.get("day") or "").strip() or \
+        (datetime.date.today() - datetime.timedelta(days=0)).isoformat()
+    text = await summarise_day(day, payload.get("agent", "local") or "local")
+    if not text:
+        return web.json_response({"ok": False, "day": day,
+                                  "error": "nothing worth summarising"}, status=404)
+    return web.json_response({"ok": True, "day": day, "summary": text})
+
+
+async def diary_read(request):
+    return web.json_response({"days": [{"day": d, "text": t}
+                                       for d, t in read_diary(DIARY_DAYS)]})
+
+
 def time_context():
     """The current local time, stated plainly for the model.
 
@@ -2745,7 +2880,7 @@ NOTE_FRAMING = (
 
 
 async def nova_turn(question, history=(), agent_name="local", persona_on=True,
-                    max_tokens=600, voice="nova"):
+                    max_tokens=600, voice="nova", system_extra=""):
     """Ask Nova something and get her answer, with all her faculties attached.
 
     history is [(role, content), ...] oldest first, already trimmed by the
@@ -2804,6 +2939,16 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
     known = about_context()
     if known and persona_on:
         system += "\n\n" + known
+    # And what has been happening. Facts are who he is; this is what the last
+    # few days were, which is the half that makes "how did that go?" possible.
+    recent = diary_context()
+    if recent and persona_on:
+        system += "\n\n" + recent
+    # Appended, never substituted. A caller with a specific job — compose one
+    # follow-up question, say — still wants her voice; replacing the persona
+    # would get the task done in a stranger's register.
+    if system_extra:
+        system += "\n\n" + system_extra
     messages = [{"role": "system", "content": system}]
     if persona_on:
         # Demonstrated, not described. A 3B ignores a description of a voice and
@@ -2872,7 +3017,8 @@ async def ask(request):
                           max_tokens=int(payload.get("max_tokens", 600)),
                           # Defaults to nova, so an existing caller that
                           # knows nothing about voices keeps the web one.
-                          voice=(payload.get("voice") or "nova").lower())
+                          voice=(payload.get("voice") or "nova").lower(),
+                          system_extra=payload.get("system_extra") or "")
     return web.json_response(out)
 
 

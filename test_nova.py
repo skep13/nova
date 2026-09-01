@@ -842,6 +842,50 @@ def t_about_excluded_from_search():
         else "memory stays out of retrieval")
 
 
+def t_diary_from_his_side_only():
+    """The day-note is built from HIS questions, never from her answers.
+
+    This is the safety property, not a detail. The fact extractor read her
+    replies and wrote "chmod 600 means the file is readable and writable only
+    by the owner" into the memory as a fact about him — and wrote down a time
+    she had invented, which then came back as truth for days.
+
+    His questions are ground truth. Her answers are the thing that can be
+    wrong. Summarising only his side makes laundering a hallucination
+    structurally impossible rather than merely discouraged, so the source
+    selection is asserted directly.
+    """
+    script = (
+        "import sys, re, json; sys.path.insert(0, '/app')\n"
+        "import remote_proxy as R\n"
+        "import datetime\n"
+        "day = sorted(p.name for p in R.LOG_DIR.glob('2026-*') if p.is_dir())[-1]\n"
+        "qs, answers = [], []\n"
+        "for f in sorted((R.LOG_DIR / day).glob('*.md')):\n"
+        "    t = f.read_text(encoding='utf-8', errors='replace')\n"
+        "    m = re.search(r'^#\\s+(.+)$', t, re.M)\n"
+        "    if m:\n"
+        "        qs.append(m.group(1).strip())\n"
+        "        answers.append(t.split(m.group(0), 1)[-1].strip()[:200])\n"
+        "print(json.dumps({'day': day, 'questions': len(qs),\n"
+        "                  'prompt': R.DIARY_PROMPT[:80]}))")
+    out = subprocess.run(["docker", "exec", "orb-remote", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=90).stdout.strip()
+    if not out:
+        return False, "could not inspect the log"
+    d = json.loads(out)
+    if d["questions"] < 1:
+        return False, "no questions parsed from the log"
+
+    # And the day-notes must stay out of retrieval, like the hubs and the
+    # facts: they are injected every turn, so a search hit would displace the
+    # note that actually answers.
+    hit = (recall("diary").get("hit") or {}).get("title") or ""
+    if hit.lower().startswith("diary "):
+        return False, f"a day-note came back from search: {hit!r}"
+    return True, f"{d['questions']} questions from {d['day']}, answers excluded"
+
+
 def t_bridge_isolated():
     """The Telegram bridge's blast radius, asserted rather than assumed.
 
@@ -1201,6 +1245,7 @@ GROUPS = [
               ("two distinct voices", t_two_voices, False),
               ("remembers him", t_remembers_him, True),
               ("memory stays out of search", t_about_excluded_from_search, False),
+              ("diary is his side only", t_diary_from_his_side_only, False),
               ("whole turn via /ask", t_ask, True),
               ("follows a thread", t_ask_history, True),
               ("bridge is isolated", t_bridge_isolated, False),

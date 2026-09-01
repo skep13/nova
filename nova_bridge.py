@@ -89,8 +89,10 @@ ALLOW = {c.strip() for c in os.environ.get("NOVA_TG_ALLOW", "").split(",") if c.
 # stranger that a code exists is telling them what to look for.
 ENROL_CODE = os.environ.get("NOVA_TG_ENROL", "").strip()
 
-# Which brain answers a chat message. "local" keeps everything on the laptop.
-CHAT_AGENT = os.environ.get("NOVA_CHAT_AGENT", "fast")
+# Which brain answers a chat message. Local by default: nothing about a
+# conversation leaves the box. "fast" is better at the register and sends the
+# message, the history, any retrieved note and her memory to the provider.
+CHAT_AGENT = os.environ.get("NOVA_CHAT_AGENT", "local")
 
 HEALTH_EVERY = int(os.environ.get("NOVA_HEALTH_EVERY", "300"))
 MAX_REPLY = 3800          # Telegram's limit is 4096; leave room for a prefix
@@ -767,6 +769,106 @@ def _plus_minutes(hhmm, minutes):
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+DIARY_URL = os.environ.get("NOVA_DIARY_URL", "http://remote:5003/diary")
+# When she may start a conversation, and how often. Once a day at most: a
+# friend who messages you five times about the same thing is not a friend.
+FOLLOWUP_AT = os.environ.get("NOVA_FOLLOWUP_AT", "18:30")
+FOLLOWUP_ON = os.environ.get("NOVA_FOLLOWUP", "1") == "1"
+
+FOLLOWUP_PROMPT = (
+    "Below is a note about what this person was doing over the last few days. "
+    "Write ONE short message asking about the single most obviously unfinished "
+    "thing — the sort of thing a friend would think to ask about later.\n\n"
+    "One or two sentences. No greeting, no preamble. Ask about something "
+    "actually named in the note; never invent a detail, a time, or an outcome. "
+    "If nothing in it is worth following up on, reply with exactly: NONE"
+)
+
+
+async def watch_followup(session):
+    """Once a day, ask about something he was in the middle of.
+
+    The whole difference between an assistant and someone keeping up with you
+    is who speaks first. She has had the plumbing for this since the morning
+    brief; it only ever fired for weather and broken backups.
+
+    Deliberately bounded. One message a day, only when the diary has something
+    in it, never twice about the same day, and NOVA_FOLLOWUP=0 turns it off.
+    A friend who messages five times about the same thing is not a friend.
+    """
+    while True:
+        try:
+            state = load_state()
+            today = time.strftime("%Y-%m-%d")
+            due = FOLLOWUP_AT <= time.strftime("%H:%M") <= _plus_minutes(FOLLOWUP_AT, 45)
+            if FOLLOWUP_ON and due and state.get("followed_up") != today and allowed():
+                text = await compose_followup(session)
+                if text:
+                    for chat in sorted(allowed()):
+                        await send(session, chat, text)
+                    log("sent a follow-up")
+                # Marked either way. A day with nothing worth asking about is
+                # still a day that has had its one attempt, or she would retry
+                # every minute of the window.
+                state = load_state()
+                state["followed_up"] = today
+                save_state(state)
+        except Exception as exc:
+            log(f"follow-up failed: {type(exc).__name__}: {exc}")
+        await asyncio.sleep(120)
+
+
+async def compose_followup(session):
+    """One question about an unfinished thing, or None."""
+    try:
+        async with session.get(DIARY_URL) as r:
+            days = (await r.json()).get("days") or []
+    except Exception:
+        return None
+    if not days:
+        return None
+
+    note = "\n".join(f"{d['day']}: {d['text']}" for d in days[-3:])
+    body = {"q": note, "voice": "marina", "agent": CHAT_AGENT,
+            "system_extra": FOLLOWUP_PROMPT}
+    try:
+        async with session.post(ASK_URL, json=body,
+                                timeout=aiohttp.ClientTimeout(
+                                    total=None, sock_read=600)) as r:
+            text = (await r.json()).get("answer", "").strip()
+    except Exception:
+        return None
+    if not text or text.strip().upper().startswith("NONE"):
+        return None
+    return text
+
+
+async def watch_diary(session):
+    """Write up the day, once, in the evening.
+
+    Late enough that the day is mostly over and early enough that the machine
+    is unlikely to be busy. Cheap to repeat: summarising the same day twice
+    just overwrites the note.
+    """
+    while True:
+        try:
+            state = load_state()
+            today = time.strftime("%Y-%m-%d")
+            due = time.strftime("%H:%M") >= os.environ.get("NOVA_DIARY_AT", "22:00")
+            if due and state.get("diary_written") != today:
+                async with session.post(DIARY_URL, json={"day": today},
+                                        timeout=aiohttp.ClientTimeout(
+                                            total=None, sock_read=600)) as r:
+                    ok = (await r.json()).get("ok")
+                state = load_state()
+                state["diary_written"] = today
+                save_state(state)
+                log(f"diary for {today}: {'written' if ok else 'nothing to write'}")
+        except Exception as exc:
+            log(f"diary failed: {type(exc).__name__}: {exc}")
+        await asyncio.sleep(300)
+
+
 async def watch_brief(session):
     """Send the morning brief once a day, at the configured local time.
 
@@ -1244,6 +1346,8 @@ async def poll():
         asyncio.create_task(watch_health(session))
         asyncio.create_task(watch_brief(session))
         asyncio.create_task(watch_reminders(session))
+        asyncio.create_task(watch_diary(session))
+        asyncio.create_task(watch_followup(session))
         while True:
             tok = token()
             if not tok:
