@@ -23,7 +23,7 @@ services:
       -hf unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M
       --host 0.0.0.0
       --port 8080
-      -c 8192
+      -c 6144
       -t 2
       --parallel 1
       --jinja
@@ -48,15 +48,24 @@ services:
           # taken while the page cache happened to be warm — precise-looking
           # and unrepresentative. 71s is the idle figure.)
           #
-          # Two things to watch. It fits at 4.07 of 4.49 GB, so this cap has
-          # little slack; check `free -m` before growing anything else. And it
-          # confabulates specifics more fluently than the 3B did — it invented
-          # a time a cable "gave in at 14:47" — which persona_marina.py now has
-          # an explicit rule against.
+          # 4600m WAS NOT ENOUGH and this is what that looks like: the kernel
+          # killed llama-server at 4.69 GB anon-rss under concurrent load, and
+          # five unrelated tests failed at once because everything hit a model
+          # that was reloading. The weights fit; the KV CACHE was what grew,
+          # and it grew because the prompt did — persona, facts, day-notes and
+          # a retrieved note now travel on every turn.
+          #
+          # So both ends: 5200m, and context down from 8192 to 6144. 6144 is
+          # chosen rather than 4096 because the prompt alone is now roughly
+          # 4000 tokens and truncation would silently drop the memory.
+          #
+          # It also confabulates specifics more fluently than the 3B did — it
+          # invented a time a cable "gave in at 14:47" — which persona_marina.py
+          # now has an explicit rule against.
           #
           # THE WEB UI USES THIS MODEL TOO. Telegram defaults to the hosted
           # agent, so the slowdown lands mostly on the page.
-          memory: 4600m
+          memory: 5200m
 
   # Embeddings, for meaning-based vault search. Lexical retrieval cannot match
   # "how do i stop someone bleeding out" to a note titled Bleeding: there is no
@@ -346,7 +355,12 @@ services:
         limits:
           # Raised from 128m: the place list is held in memory so a lookup is
           # a bisect and a few hundred haversines rather than a file read.
-          memory: 256m
+          #
+          # 384m now. At 256m it was OOM-killed at 223 MB anon-rss: the vault
+          # is loaded and indexed in memory and has grown to 1424 notes, and
+          # the per-turn prompt now carries the persona, the facts and the
+          # day-notes as well.
+          memory: 384m
 
   # Nova over Telegram: reachable when the page is not open, and able to speak
   # first when something breaks. Long polling, so nothing is published and

@@ -2297,7 +2297,16 @@ async def complete(session, agent, messages, max_tokens, temperature=None):
         payload["temperature"] = temperature
     async with session.post(LOCAL_URL, json=payload) as r:
         out = await r.json()
-    return out["choices"][0]["message"]["content"], "local"
+    # Checked rather than indexed. llama returns {"error": ...} while it is
+    # loading, and it reloads whenever it has been restarted or OOM-killed —
+    # so this fired a bare KeyError: 'choices' into five different callers at
+    # once, each surfacing as its own confusing failure. "The model is not
+    # ready" is one fault and should read as one.
+    try:
+        return out["choices"][0]["message"]["content"], "local"
+    except (KeyError, IndexError, TypeError):
+        detail = str(out.get("error") or out)[:200] if isinstance(out, dict) else ""
+        raise RuntimeError(f"local model returned no completion: {detail}")
 
 
 # --- one whole Nova turn, for callers that are not the web page -------------

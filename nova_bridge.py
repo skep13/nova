@@ -240,6 +240,29 @@ async def typing(session, chat, stop):
             pass
 
 
+async def send_conversationally(session, chat, text):
+    """Send a short two-part reply as two messages, the way people text.
+
+    One paragraph containing a reaction and then a question arrives as a wall.
+    The same words sent as "That cable is cursed." followed by "Did it give in?"
+    read as someone talking. It is a small thing and it is most of the
+    difference between a chat and a form response.
+
+    Only when it is genuinely short and genuinely two beats. A long answer, or
+    anything with code in it, goes as one message — splitting a technical reply
+    is just making it harder to read.
+    """
+    parts = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
+    if (len(parts) == 2 and len(text) < 300
+            and "`" not in text and not any(len(p) > 180 for p in parts)):
+        await send(session, chat, parts[0])
+        # A beat, so the two do not land in the same instant.
+        await asyncio.sleep(1.2)
+        await send(session, chat, parts[1])
+        return
+    await send(session, chat, text)
+
+
 async def send(session, chat, text):
     """One message out. Long replies are split rather than truncated."""
     tok = token()
@@ -1280,7 +1303,11 @@ async def answer(session, chat, text, spoken=False):
     # Text always: it is scannable, searchable in the chat history, and works
     # when a voice note cannot be played. The spoken copy is an addition for
     # someone who asked out loud, never a replacement.
-    await send(session, chat, reply)
+    #
+    # Conversationally, so a short reaction-then-question arrives as two
+    # messages rather than one block. Only the chat path — a status line or the
+    # contents of a note has no business being broken in half.
+    await send_conversationally(session, chat, reply)
     if spoken:
         await send_voice(session, chat, reply)
 
