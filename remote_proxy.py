@@ -2733,7 +2733,35 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
     #
     # CORE_RULES is shared: it governs output shape, not character, and applies
     # wherever a reply might be read aloud.
-    voice_persona = persona_marina.PERSONA if voice == "marina" else persona.PERSONA
+    # And a shorter Marina when a small model is answering.
+    #
+    # The full persona is ~8 KB, which gpt-oss-120b holds without trouble. A 4B
+    # is spreading its attention across that plus the capability note, the
+    # clock, what she remembers about him, any retrieved note — and then the
+    # question. Fewer sharper rules measurably beat more of them on small
+    # models, and the failures were never a missing rule.
+    # Resolved BEFORE the prompt is built, not after. The requested agent is
+    # not necessarily the one that answers — an unreachable hosted model falls
+    # back to local — and choosing the persona from the request would hand the
+    # 8 KB version to the 4B on exactly the days the hosted one is down. Which
+    # is the worst pairing available and would look like a random bad mood.
+    agent = BY_NAME.get(agent_name, BY_NAME["local"])
+    if not available(agent):
+        agent = BY_NAME["local"]
+
+    # persona_marina.SHORT was TRIED HERE AND REVERTED. The reasoning was
+    # sound and the measurement disagreed: a 1.9 KB Marina for the local model,
+    # on the theory that a 3B spreads its attention thin across 8 KB of rules.
+    #
+    # It got WORSE. "Maybe grab a cuppa and a sit down" — the tea ban is in the
+    # short version too, as one clause instead of its own paragraph, and one
+    # clause did not hold. "You're tired and cold there" is not a sentence. The
+    # long prohibitions were not padding; the detail was doing the work.
+    #
+    # SHORT is kept in the file as a documented failure, not deleted, so the
+    # next person to have this idea can read the result first.
+    voice_persona = (persona_marina.PERSONA if voice == "marina"
+                     else persona.PERSONA)
     system = (voice_persona if persona_on else persona.PLAIN) + persona.CORE_RULES
     if persona_on:
         system += "\n\n" + ASK_CAPABILITIES
@@ -2772,10 +2800,6 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
                 "have not.")})
 
     messages.append({"role": "user", "content": question})
-
-    agent = BY_NAME.get(agent_name, BY_NAME["local"])
-    if not available(agent):
-        agent = BY_NAME["local"]
 
     async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_read=900)) as s:
