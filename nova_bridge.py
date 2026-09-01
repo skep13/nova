@@ -56,6 +56,9 @@ NOTES_URL = os.environ.get("NOVA_NOTES_URL", "http://remote:5003/notes")
 NOTE_FROM_TEXT_URL = os.environ.get("NOVA_NOTE_URL",
                                     "http://remote:5003/note/from-text")
 RESEARCH_URL = os.environ.get("NOVA_RESEARCH_URL", "http://remote:5003/research")
+ABOUT_URL = os.environ.get("NOVA_ABOUT_URL", "http://remote:5003/about")
+ABOUT_FORGET_URL = os.environ.get("NOVA_FORGET_URL",
+                                  "http://remote:5003/about/forget")
 
 HELP = (
     "Ask me anything and I'll answer from your vault or what I know.\n\n"
@@ -69,6 +72,8 @@ HELP = (
     "remind me in 20 minutes to X / remind me at 7pm to X\n"
     "timer for 10 minutes\n"
     "reminders - what is set; cancel 3; cancel all\n"
+    "remember <something> - kept, and used from then on\n"
+    "what do you know about me - everything kept; forget 3, forget all\n"
     "reset - forget this conversation\n\n"
     "Voice notes work. Send one and you get one back."
 )
@@ -83,6 +88,9 @@ ALLOW = {c.strip() for c in os.environ.get("NOVA_TG_ALLOW", "").split(",") if c.
 # this bot; anyone else is refused without being told why, because telling a
 # stranger that a code exists is telling them what to look for.
 ENROL_CODE = os.environ.get("NOVA_TG_ENROL", "").strip()
+
+# Which brain answers a chat message. "local" keeps everything on the laptop.
+CHAT_AGENT = os.environ.get("NOVA_CHAT_AGENT", "fast")
 
 HEALTH_EVERY = int(os.environ.get("NOVA_HEALTH_EVERY", "300"))
 MAX_REPLY = 3800          # Telegram's limit is 4096; leave room for a prefix
@@ -875,6 +883,15 @@ _NOT_WEATHER = re.compile(
 def wants_weather(text):
     return bool(_WEATHER.search(text)) and not _NOT_WEATHER.search(text)
 _SET_LOC = re.compile(r"^\s*set (?:my )?location (?:to )?(.+?)\s*[.!]*\s*$", re.I)
+# "remember that X" / "remember X" / "note that X about me"
+_REMEMBER = re.compile(
+    r"^\s*(?:please\s+)?remember(?:\s+that)?\s+(.+?)\s*[.!]*\s*$", re.I)
+_WHAT_KNOWN = re.compile(
+    r"^\s*(?:what\s+do\s+you\s+(?:know|remember)\s+about\s+me|"
+    r"what\s+do\s+you\s+remember|what\s+have\s+you\s+got\s+on\s+me)\s*[?.!]*\s*$",
+    re.I)
+_FORGET = re.compile(r"^\s*forget\s+(?:fact\s+)?(\d+|all|everything)\s*[.!]*\s*$",
+                     re.I)
 
 
 async def research(session, chat, topic, spoken=False):
@@ -941,6 +958,53 @@ async def answer(session, chat, text, spoken=False):
         return await send(session, chat, "Cleared. Starting fresh.")
     if low in ("help", "commands", "what can you do"):
         return await send(session, chat, HELP)
+
+    # Memory, told directly. Deterministic: the automatic extraction is best
+    # effort and the 3B misjudges what is durable, so this is the path that
+    # always works.
+    m = _REMEMBER.match(text)
+    if m:
+        try:
+            async with session.post(ABOUT_URL, json={"fact": m.group(1)}) as r:
+                out = await r.json()
+        except Exception as exc:
+            return await send(session, chat,
+                              f"I couldn't write that down ({type(exc).__name__}).")
+        if out.get("already"):
+            return await send(session, chat, "Already knew that one.")
+        if not out.get("ok"):
+            return await send(session, chat, out.get("error", "I couldn't."))
+        log(f"remembered a fact, {out.get('count')} total")
+        return await send(session, chat, f"Noted. That's {out.get('count')} "
+                                         f"things I know about you.")
+
+    if _WHAT_KNOWN.match(text):
+        try:
+            async with session.get(ABOUT_URL) as r:
+                facts = (await r.json()).get("facts") or []
+        except Exception as exc:
+            return await send(session, chat,
+                              f"I couldn't read that ({type(exc).__name__}).")
+        if not facts:
+            return await send(session, chat,
+                              "Nothing yet. Say \"remember\" and something, and "
+                              "I'll keep it.")
+        return await send(session, chat, "\n".join(
+            f"{i}. {f}" for i, f in enumerate(facts, 1)))
+
+    m = _FORGET.match(text)
+    if m:
+        try:
+            async with session.post(ABOUT_FORGET_URL,
+                                    json={"which": m.group(1)}) as r:
+                out = await r.json()
+        except Exception as exc:
+            return await send(session, chat,
+                              f"I couldn't ({type(exc).__name__}).")
+        if not out.get("ok"):
+            return await send(session, chat, "Nothing matching that.")
+        return await send(session, chat,
+                          f"Forgotten. {out.get('count')} left.")
 
     m = _SET_LOC.match(text)
     if m:
@@ -1049,7 +1113,18 @@ async def answer(session, chat, text, spoken=False):
 
     # Marina, not Nova. Same machine, same vault, different character:
     # Nova is the web assistant and Marina is who answers here.
-    body = {"q": text, "voice": "marina",
+    #
+    # And a bigger brain than the 3B. Every prompt fix held and the model kept
+    # finding a new way to produce the same flat register — that is capacity,
+    # not wording, and gpt-oss-120b is roughly forty times the parameters.
+    # complete() already falls back to local when a hosted agent is
+    # unreachable, so this degrades to exactly what it was rather than failing.
+    #
+    # WHAT LEAVES THE BOX: with this set, his message, the conversation so far,
+    # any vault note retrieved for it, and what Nova remembers about him all go
+    # to the hosted provider. NOVA_CHAT_AGENT=local keeps everything on the
+    # laptop and costs only the register.
+    body = {"q": text, "voice": "marina", "agent": CHAT_AGENT,
             "history": [{"role": r, "content": c}
                         for r, c in _history.get(chat, [])]}
     try:

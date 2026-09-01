@@ -779,6 +779,59 @@ def t_two_voices():
         f"nova {len(p['nova'])} chars, marina {len(p['marina'])} chars, distinct")
 
 
+def t_remembers_him():
+    """A fact told once is used in a conversation with no history.
+
+    Until this existed she knew nothing about the user at all: 1424 notes, none of
+    them about him, and six turns of history held in RAM and lost on restart. A
+    friend who forgets everything between conversations is not a friend however
+    warmly it phrases things, which is why the tone work kept hitting a
+    ceiling.
+
+    Asserted with an EMPTY history on purpose. Anything she knows has to come
+    from the stored file, so passing this cannot be an accident of the
+    conversation still being in the buffer.
+    """
+    import random
+    marker = f"kestrel{random.randint(10000, 99999)}"
+    fact = f"His workshop soldering iron is called the {marker}"
+    if not (jpost("/about", {"fact": fact}, timeout=60) or {}).get("ok"):
+        return False, "could not store a fact"
+
+    out = jpost("/ask", {"q": "what is my soldering iron called?",
+                         "voice": "marina", "history": []}, timeout=300) or {}
+    answer = (out.get("answer") or "")
+
+    facts = (jget("/about", timeout=60) or {}).get("facts", [])
+    idx = next((i for i, f in enumerate(facts, 1) if marker in f), None)
+    if idx:
+        jpost("/about/forget", {"which": str(idx)}, timeout=60)
+
+    if marker.lower() not in answer.lower():
+        return False, f"did not use the stored fact: {answer[:100]!r}"
+    return True, "recalled a stored fact with no conversation history"
+
+
+def t_about_excluded_from_search():
+    """The memory file must not come back as a search result.
+
+    It is injected on every turn already. As a retrieval hit it would displace
+    the note that actually answers with a list of things he once mentioned —
+    the same failure the hub tag prevents.
+    """
+    marker = "zzq-about-probe"
+    jpost("/about", {"fact": f"He once mentioned {marker}"}, timeout=60)
+    hit = (recall(marker).get("hit") or {})
+    facts = (jget("/about", timeout=60) or {}).get("facts", [])
+    idx = next((i for i, f in enumerate(facts, 1) if marker in f), None)
+    if idx:
+        jpost("/about/forget", {"which": str(idx)}, timeout=60)
+    title = hit.get("title") or ""
+    return "About the user" not in title, (
+        f"the memory file was returned by search: {title!r}" if "About the user" in title
+        else "memory stays out of retrieval")
+
+
 def t_bridge_isolated():
     """The Telegram bridge's blast radius, asserted rather than assumed.
 
@@ -875,11 +928,19 @@ def t_bridge_default_deny():
 def t_research_floor():
     # Reports the code it actually got. The old message read "nonsense is
     # refused rather than written up" whether it passed or failed, which is
-    # exactly as useful as saying nothing: an intermittent failure here gave no
-    # clue whether the answer was a 200, a 500 or an empty string from a
-    # timeout, and standalone runs would not reproduce it.
+    # exactly as useful as saying nothing.
+    #
+    # And the nonsense is generated fresh each run, because the fixed string
+    # stopped being nonsense. "blorp glimf wuzzle" turned out to appear on a
+    # brainly.com page about inventing silly words — which contains both blorp
+    # and wuzzle, so it passed the two-shared-terms relevance rule honestly.
+    # The floor was working; the test's assumption that those words exist
+    # nowhere had quietly become false.
+    import random
+    nonsense = " ".join("".join(random.choice("bcdfghjklmnpqrstvwxz" "aeiou")
+                                for _ in range(7)) for _ in range(3))
     code = code_of("/research", "POST",
-                   {"q": "blorp glimf wuzzle", "agent": "fast"}, timeout=120)
+                   {"q": nonsense, "agent": "fast"}, timeout=120)
     return code == "404", (f"nonsense refused with {code}" if code == "404"
                            else f"expected 404, got {code!r}")
 
@@ -1128,6 +1189,8 @@ GROUPS = [
                    ("stem plurals", t_stem_plurals, False)]),
     ("nova", [("persona has not drifted", t_persona_no_drift, False),
               ("two distinct voices", t_two_voices, False),
+              ("remembers him", t_remembers_him, True),
+              ("memory stays out of search", t_about_excluded_from_search, False),
               ("whole turn via /ask", t_ask, True),
               ("follows a thread", t_ask_history, True),
               ("bridge is isolated", t_bridge_isolated, False),

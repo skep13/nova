@@ -838,7 +838,10 @@ def load_vault(force=False):
                 # worst possible hit: a list of links mentioning every term in
                 # its topic, which outranks the one note that answers the
                 # question and then answers with an index instead of a fact.
-                if re.search(r"^tags:.*\bmoc\b", fm.group(1), re.M):
+                # "about" joins "moc" here: it is injected on every turn
+                # already, and as a search result it would displace the note
+                # that answers with a list of things he once mentioned.
+                if re.search(r"^tags:.*\b(?:moc|about)\b", fm.group(1), re.M):
                     continue
             h = re.search(r"^#\s+(.+)$", body, re.M)
             if not title and h:
@@ -2328,6 +2331,145 @@ async def complete(session, agent, messages, max_tokens, temperature=None):
 # on one side or the other, and "what can you do" was already answered with a
 # vague description of being an AI — which is what you get when nothing tells
 # it what it has.
+# --- what she knows about him ------------------------------------------------
+#
+# Until now: nothing. 1424 notes, none of them about the user, six turns of history
+# held in RAM and lost on restart. A friend who forgets everything between
+# conversations is not a friend however warmly it phrases things, and no amount
+# of persona fixes that — which is why the tone work kept hitting a ceiling.
+#
+# Kept as an ordinary vault note rather than a private database, deliberately.
+# It syncs to Obsidian, it is in the nightly backup, and above all HE CAN EDIT
+# IT. A memory of you that you cannot read or correct is a worse thing to be
+# given than no memory at all.
+#
+# Excluded from retrieval by its tag and injected on every turn instead: it is
+# context about who is speaking, not an article that might answer a question.
+ABOUT_FILE = "about-user.md"
+ABOUT_MAX = 40                 # facts; past this the oldest are dropped
+ABOUT_FACT_MAX = 160           # characters each
+
+
+def about_path():
+    return VAULT_DIR / ABOUT_FILE
+
+
+def read_about():
+    """The remembered facts, oldest first."""
+    try:
+        body = about_path().read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    return [l[2:].strip() for l in body.splitlines()
+            if l.startswith("- ") and l[2:].strip()]
+
+
+def write_about(facts):
+    facts = facts[-ABOUT_MAX:]
+    doc = ("---\n"
+           f"created: {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+           "title: About the user\n"
+           # The tag keeps it out of retrieval. Without it, asking about
+           # anything he has ever mentioned would return this file instead of
+           # the note that answers.
+           "tags: [about, nova]\n"
+           "---\n\n"
+           "# About the user\n\n"
+           "What Nova has picked up. Edit or delete any line — this is read as "
+           "written, so a correction here IS the correction.\n\n"
+           + "\n".join("- " + f for f in facts) + "\n")
+    try:
+        VAULT_DIR.mkdir(parents=True, exist_ok=True)
+        about_path().write_text(doc, encoding="utf-8")
+        global _vault_stamp
+        _vault_stamp = -1.0
+    except Exception:
+        pass
+
+
+def about_context():
+    facts = read_about()
+    if not facts:
+        return ""
+    return ("What you know about him, from earlier conversations. Use it the "
+            "way a friend uses what they remember — naturally, and only when "
+            "relevant. Do not recite it back at him or announce that you "
+            "remembered.\n" + "\n".join("- " + f for f in facts))
+
+
+# Extraction, not judgement — the same division that works everywhere else
+# here. A cheap pass decides whether the exchange contained anything durable;
+# the model only has to say what it was.
+#
+# "Durable" is the whole difficulty. "He asked what chmod means" is not worth
+# keeping and would fill the file with transcript. What is worth keeping is
+# what would still be true next week.
+FACT_EXTRACT = (
+    "You note down durable facts about the user from a conversation. Reply "
+    "with one line per fact, at most three:\n"
+    "FACT|<the fact, one short sentence, third person>\n"
+    "If there is nothing durable, reply with exactly: NONE\n\n"
+    "Durable means still true next week: what he is building, owns, uses, "
+    "prefers, has decided, is called, where he is, what he does.\n"
+    # The distinction the first version missed entirely. "Fighting that cable
+    # on the thinkpad all morning" was extracted as NONE, because the fight is
+    # obviously temporary — and the ThinkPad went with it.
+    "A passing situation usually contains something that is not passing. If he "
+    "mentions a machine, a tool, a place, a person or a project while "
+    "describing something temporary, the THING is durable even though the "
+    "situation is not: fighting a cable this morning is not worth noting, "
+    "owning the laptop it is plugged into is.\n"
+    "If he says something was fixed, solved, chosen or decided, the OUTCOME is "
+    "durable even when the effort was not.\n"
+    "NOT what he asked about, NOT what you told him, NOT how the conversation "
+    "went, NOT anything about you, NOT how he feels right now. Never guess or "
+    "embellish — only what he actually said."
+)
+
+
+async def remember_about(question, answer):
+    """Note anything durable from one exchange. Best effort, never blocking.
+
+    Runs AFTER the reply has gone out, as a background task, because a second
+    model call on a two-core box would otherwise double the time he waits for
+    every message.
+    """
+    try:
+        messages = [{"role": "system", "content": FACT_EXTRACT},
+                    {"role": "user",
+                     "content": f"He said: {question}\n\nYou replied: {answer[:600]}"}]
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None, sock_read=300)) as s:
+            raw, _ = await complete(s, BY_NAME["local"], messages, 160,
+                                    temperature=0.1)
+    except Exception:
+        return
+
+    existing = read_about()
+    lowered = [f.lower() for f in existing]
+    added = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.upper().startswith("FACT|"):
+            continue
+        fact = line.split("|", 1)[1].strip().rstrip(".")[:ABOUT_FACT_MAX]
+        if len(fact) < 8:
+            continue
+        # Crude duplicate check: an exact repeat, or one line wholly inside
+        # another. Good enough to stop the file filling with restatements of
+        # the same thing, which is what it did on the first run.
+        low = fact.lower()
+        if any(low in e or e in low for e in lowered):
+            continue
+        existing.append(fact)
+        lowered.append(low)
+        added.append(fact)
+    if added:
+        write_about(existing)
+        log_line = ", ".join(a[:40] for a in added)
+        print(f"remembered: {log_line}", flush=True)
+
+
 def time_context():
     """The current local time, stated plainly for the model.
 
@@ -2599,6 +2741,12 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
     # matter of character, and a plain assistant saying "morning" at seven in
     # the evening is just as wrong.
     system += "\n\n" + time_context()
+    # Who he is, before what he asked. A friend walks in already knowing this;
+    # it is not something to look up mid-sentence, which is why it is injected
+    # rather than retrieved.
+    known = about_context()
+    if known and persona_on:
+        system += "\n\n" + known
     messages = [{"role": "system", "content": system}]
     if persona_on:
         # Demonstrated, not described. A 3B ignores a description of a voice and
@@ -2641,6 +2789,10 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
 
     answer = strip_closing_offer(strip_model_disclaimer(strip_opening_praise(answer)))
     log_exchange(question, answer, used, agent.get("model") or "")
+    # In the background: he has his reply already, and a second model call in
+    # line would double the wait for every message on two cores.
+    if persona_on and answer:
+        asyncio.create_task(remember_about(question, answer))
     return {"answer": answer, "agent": used,
             "source": hit["title"] if hit else None}
 
@@ -2951,6 +3103,59 @@ async def _note_write_dict(payload):
                               "file": path.name, "title": title, "body": body})
 
 
+async def about_write(request):
+    """Remember something, told directly. No model involved.
+
+    The automatic extraction is best effort and the 3B is genuinely poor at it
+    — "fighting that cable on the thinkpad" came back as nothing worth keeping,
+    losing the ThinkPad along with the fight. So the reliable path is him
+    saying "remember X", which is a deterministic append and cannot misjudge
+    anything.
+
+    Automatic extraction still runs. It catches what it catches; this is the
+    one that always works.
+    """
+    payload = await request.json()
+    fact = (payload.get("fact") or "").strip().rstrip(".")[:ABOUT_FACT_MAX]
+    if len(fact) < 3:
+        return web.json_response({"error": "nothing to remember"}, status=400)
+
+    facts = read_about()
+    low = fact.lower()
+    if any(low in f.lower() or f.lower() in low for f in facts):
+        return web.json_response({"ok": True, "already": True, "fact": fact,
+                                  "count": len(facts)})
+    facts.append(fact)
+    write_about(facts)
+    return web.json_response({"ok": True, "fact": fact, "count": len(facts)})
+
+
+async def about_read(request):
+    facts = read_about()
+    return web.json_response({"facts": facts, "count": len(facts)})
+
+
+async def about_forget(request):
+    """Drop one fact by its number, or all of them.
+
+    A memory you cannot correct is worse than none, and the file is editable in
+    Obsidian — but nobody wants to open a vault on a phone to delete one wrong
+    line.
+    """
+    payload = await request.json()
+    which = str(payload.get("which") or "").strip().lower()
+    facts = read_about()
+    if which == "all":
+        write_about([])
+        return web.json_response({"ok": True, "dropped": len(facts), "count": 0})
+    if which.isdigit() and 1 <= int(which) <= len(facts):
+        gone = facts.pop(int(which) - 1)
+        write_about(facts)
+        return web.json_response({"ok": True, "dropped": 1, "fact": gone,
+                                  "count": len(facts)})
+    return web.json_response({"error": "no such fact"}, status=400)
+
+
 async def code(request):
     payload = await request.json()
     task = (payload.get("q") or "").strip()
@@ -3059,6 +3264,9 @@ app.add_routes([
     web.post("/maintain", maintain),
     web.get("/maintain", maintain_list),
     web.post("/ask", ask),
+    web.post("/about", about_write),
+    web.get("/about", about_read),
+    web.post("/about/forget", about_forget),
     web.post("/note", note_write),
     web.get("/notes", note_list),
     web.post("/note/from-text", note_from_text),

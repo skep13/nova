@@ -362,6 +362,14 @@ services:
       # brute forced at network speed.
       - NOVA_TG_ENROL=${NOVA_TG_ENROL:-nova-cedar-rowan-delta-umber-9346}
       - NOVA_TG_PER_MIN=12
+      # Which brain answers a chat message. "fast" is gpt-oss-120b on a free
+      # tier and is the reason Marina sounds like a person rather than a 3B
+      # doing an impression of one.
+      #
+      # It sends the message, the conversation, any retrieved note and what she
+      # remembers about him off the box. Set this to "local" to keep all of it
+      # on the laptop — everything still works, it just sounds flatter.
+      - NOVA_CHAT_AGENT=${NOVA_CHAT_AGENT:-fast}
       - NOVA_HEALTH_EVERY=300
       # Everything with a clock in it depends on this: the morning brief, every
       # reminder, and the date a brief was last sent. The container is UTC
