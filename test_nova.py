@@ -336,7 +336,7 @@ def t_ask():
     A model this size will answer chmod from its own weights and sound
     confident doing it, so a plausible answer proves nothing about retrieval.
     """
-    out = jpost("/ask", {"q": "what does chmod 600 mean"}, timeout=280)
+    out = jpost("/ask", {"q": "what does chmod 600 mean"}, timeout=560)
     if not out:
         return False, "no response"
     answer = (out.get("answer") or "").strip()
@@ -359,7 +359,7 @@ def t_ask_history():
         "history": [{"role": "user", "content": "what does chmod 600 mean"},
                     {"role": "assistant",
                      "content": "It sets a file readable and writable only by "
-                                "its owner."}]}, timeout=280)
+                                "its owner."}]}, timeout=560)
     if not out:
         return False, "no response"
     answer = (out.get("answer") or "").lower()
@@ -809,7 +809,7 @@ def t_remembers_him():
         return False, "could not store a fact"
 
     out = jpost("/ask", {"q": "what is my soldering iron called?",
-                         "voice": "marina", "history": []}, timeout=300) or {}
+                         "voice": "marina", "history": []}, timeout=560) or {}
     answer = (out.get("answer") or "")
 
     facts = (jget("/about", timeout=60) or {}).get("facts", [])

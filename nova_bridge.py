@@ -212,6 +212,32 @@ def try_enrol(chat, text):
             "Send a voice note and I will reply with one.")
 
 
+async def typing(session, chat, stop):
+    """Hold Telegram's "typing…" up until the reply is ready.
+
+    The local model takes about two minutes a message on this hardware. Without
+    this there is no sign anything is happening, which is indistinguishable
+    from the bot being broken — and the bot HAS been silently broken before,
+    so that guess is not unreasonable.
+
+    Telegram clears the indicator after ~5 seconds, so it has to be resent.
+    Errors are swallowed: a failed typing ping must never affect the answer.
+    """
+    tok = token()
+    while not stop.is_set() and tok:
+        try:
+            async with session.post(
+                    f"https://api.telegram.org/bot{tok}/sendChatAction",
+                    json={"chat_id": chat, "action": "typing"}) as r:
+                await r.read()
+        except Exception:
+            return
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=4)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def send(session, chat, text):
     """One message out. Long replies are split rather than truncated."""
     tok = token()
@@ -1127,14 +1153,21 @@ async def answer(session, chat, text, spoken=False):
     body = {"q": text, "voice": "marina", "agent": CHAT_AGENT,
             "history": [{"role": r, "content": c}
                         for r, c in _history.get(chat, [])]}
+    # Typing while it thinks, and stopped in a finally so a failure mid-answer
+    # cannot leave the indicator running forever.
+    stop = asyncio.Event()
+    ticker = asyncio.create_task(typing(session, chat, stop))
     try:
         async with session.post(ASK_URL, json=body,
                                 timeout=aiohttp.ClientTimeout(total=None,
-                                                              sock_read=300)) as r:
+                                                              sock_read=600)) as r:
             out = await r.json()
     except Exception as exc:
         return await send(session, chat,
                           f"I could not reach my own router ({type(exc).__name__}).")
+    finally:
+        stop.set()
+        ticker.cancel()
 
     reply = (out.get("answer") or "").strip()
     if not reply:

@@ -384,14 +384,18 @@ services:
       # brute forced at network speed.
       - NOVA_TG_ENROL=${NOVA_TG_ENROL:-nova-cedar-rowan-delta-umber-9346}
       - NOVA_TG_PER_MIN=12
-      # Which brain answers a chat message. "fast" is gpt-oss-120b on a free
-      # tier and is the reason Marina sounds like a person rather than a 3B
-      # doing an impression of one.
+      # LOCAL. Nothing about a Telegram conversation leaves this box: not the
+      # message, not the history, not a retrieved note, not what she remembers
+      # about him.
       #
-      # It sends the message, the conversation, any retrieved note and what she
-      # remembers about him off the box. Set this to "local" to keep all of it
-      # on the laptop — everything still works, it just sounds flatter.
-      - NOVA_CHAT_AGENT=${NOVA_CHAT_AGENT:-fast}
+      # That is the whole reason Qwen3-4B was adopted — a local model good
+      # enough to be worth talking to. The cost is real and known: roughly two
+      # minutes a reply against seconds from the hosted one, which is why the
+      # bridge shows a typing indicator while it thinks.
+      #
+      # "fast" (gpt-oss-120b, free tier) is still there and still better at the
+      # register. Setting it sends all of the above to the provider.
+      - NOVA_CHAT_AGENT=${NOVA_CHAT_AGENT:-local}
       - NOVA_HEALTH_EVERY=300
       # Everything with a clock in it depends on this: the morning brief, every
       # reminder, and the date a brief was last sent. The container is UTC
