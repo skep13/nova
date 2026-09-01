@@ -29,6 +29,10 @@ import urllib.parse
 BASE = "http://127.0.0.1:8080"
 QUICK = "--quick" in sys.argv
 
+# Whatever docker-compose.yml loads into llama. One place, so a model swap is a
+# one-line change here rather than a hunt through assertions.
+EXPECT_LOCAL_MODEL = "Qwen3-4B"
+
 results = []
 
 
@@ -161,7 +165,13 @@ def t_chat_local():
                            "max_tokens": 10, "agent": "local"}, timeout=180))
     txt = out["choices"][0]["message"]["content"]
     model = out.get("model", "")
-    return "alive" in txt.lower() and "Qwen2.5-3B" in model, f"{model.split('/')[-1]} said {txt.strip()[:30]!r}"
+    # The model NAME is asserted, not just that something answered. It caught a
+    # real bug once: a hardcoded fallback kept reporting "qwen2.5-1.5b" after
+    # the box was upgraded to a 3B, so every local log line named the wrong
+    # brain. Update this deliberately when the model changes — that is the
+    # point of it failing on a swap.
+    return "alive" in txt.lower() and EXPECT_LOCAL_MODEL in model, \
+        f"{model.split('/')[-1]} said {txt.strip()[:30]!r}"
 
 
 def t_chat_hosted():

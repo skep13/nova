@@ -20,7 +20,7 @@ services:
     # to be dangerous. The 3B answered 2.5-3. For a search-and-rescue device
     # that is the whole argument; the 1.5B is faster at being wrong.
     command: >
-      -hf bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M
+      -hf unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M
       --host 0.0.0.0
       --port 8080
       -c 8192
@@ -34,22 +34,29 @@ services:
           # is not about the weights (a 1.5B Q4_K_M is ~1 GB) but the KV cache,
           # which doubled with the context bump.
           #
-          # Qwen3-4B-Instruct-2507 was TRIED HERE AND REVERTED, at 4600m.
-          # Measured on the same eight questions, same conditions:
+          # 4600m for Qwen3-4B-Instruct-2507. Measured on this box, eight
+          # questions, idle:
           #
-          #     Qwen2.5-3B   mean  35.8 s
-          #     Qwen3-4B     mean 129.3 s     3.6x slower
+          #     Qwen2.5-3B   mean  71 s
+          #     Qwen3-4B     mean 129 s      ~1.8x slower
           #
-          # The voice was clearly better — "SQLite. One file. No server. No
-          # config. Just works." against a paragraph of hedging — but two
-          # minutes a message is not a chat, and it also confabulated
-          # specifics, inventing a time the cable "gave in at 14:47".
+          # Adopted with the speed known and accepted. The voice is the reason:
+          # "SQLite. One file. No server. No config. Just works." against a
+          # paragraph of hedging, and it picks up threads the 3B dropped.
           #
-          # 3.6x, not the ~1.3x the parameter count suggests, because 4.07 of
-          # 4.49 GB left almost no page cache on a box whose SATA link is
-          # already degraded to 1.5 Gb/s. A different machine would get a
-          # different answer; this one will not.
-          memory: 3500m
+          # (An earlier note here said 3.6x. That came from a 35.8s baseline
+          # taken while the page cache happened to be warm — precise-looking
+          # and unrepresentative. 71s is the idle figure.)
+          #
+          # Two things to watch. It fits at 4.07 of 4.49 GB, so this cap has
+          # little slack; check `free -m` before growing anything else. And it
+          # confabulates specifics more fluently than the 3B did — it invented
+          # a time a cable "gave in at 14:47" — which persona_marina.py now has
+          # an explicit rule against.
+          #
+          # THE WEB UI USES THIS MODEL TOO. Telegram defaults to the hosted
+          # agent, so the slowdown lands mostly on the page.
+          memory: 4600m
 
   # Embeddings, for meaning-based vault search. Lexical retrieval cannot match
   # "how do i stop someone bleeding out" to a note titled Bleeding: there is no

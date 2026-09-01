@@ -2427,6 +2427,33 @@ FACT_EXTRACT = (
 )
 
 
+# OFF by default, and that is a decision rather than caution.
+#
+# Left on for one afternoon, the automatic extractor filled the memory with:
+#
+#   - chmod 600 means the file is readable and writable only by the owner
+#   - Swallows don't have airspeed in kelvin
+#   - He is not built for warmth
+#   - The SATA cable is still fighting          (four near-duplicates)
+#
+# Those are HER OWN ANSWERS, filed as durable facts about HIM, alongside
+# ephemera and restatements the substring dedup did not catch. The prompt says
+# "NOT what you told him" in those words; neither model held it.
+#
+# The real damage was worse than clutter. Qwen3-4B hallucinated that a cable
+# "gave in at 14:47"; the extractor wrote that down; and because the memory is
+# injected into every turn, the invention became a permanent fact that it then
+# repeated verbatim in later conversations. A hallucination laundered into
+# context is exactly what /research already refuses to do — generated notes are
+# barred as research sources for this precise reason — and the same rule was
+# missing here.
+#
+# So: explicit "remember X" is the path, being a deterministic append that
+# cannot misjudge anything. This stays behind a flag for anyone who wants to
+# improve the extractor and measure it against these failures.
+AUTO_REMEMBER = os.environ.get("NOVA_AUTO_REMEMBER", "0") == "1"
+
+
 async def remember_about(question, answer):
     """Note anything durable from one exchange. Best effort, never blocking.
 
@@ -2434,6 +2461,8 @@ async def remember_about(question, answer):
     model call on a two-core box would otherwise double the time he waits for
     every message.
     """
+    if not AUTO_REMEMBER:
+        return
     try:
         messages = [{"role": "system", "content": FACT_EXTRACT},
                     {"role": "user",
