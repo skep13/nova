@@ -46,6 +46,8 @@ import time
 import aiohttp
 
 ASK_URL = os.environ.get("NOVA_ASK_URL", "http://remote:5003/ask")
+CORRECT_URL = os.environ.get("NOVA_CORRECT_URL",
+                             "http://remote:5003/correct")
 HEALTH_URL = os.environ.get("NOVA_HEALTH_URL", "http://remote:5003/health")
 STT_URL = os.environ.get("NOVA_STT_URL", "http://whisper:8080/inference")
 TTS_URL = os.environ.get("NOVA_TTS_URL", "http://piper:5000/synthesize")
@@ -377,111 +379,13 @@ async def send_voice(session, chat, text):
 
 # --- reminders and timers ----------------------------------------------------
 #
-# Parsed, not modelled. "in twenty minutes" and "at half seven" are a small
-# regular grammar, and the failure modes of getting them wrong are the worst
-# kind: a reminder that silently never fires is indistinguishable from one that
-# was never set, and the user finds out by missing the thing.
-#
-# So the clock is arithmetic and the only thing the model would have been asked
-# for — what the reminder is ABOUT — is just the rest of the sentence.
-_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
-          "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
-          "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
-          "d": 86400, "day": 86400, "days": 86400,
-          "w": 604800, "week": 604800, "weeks": 604800}
-
-_WORD_NUMBERS = {
-    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-    "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
-    "forty-five": 45, "fortyfive": 45, "sixty": 60, "half": 0.5,
-}
-
-# "in" and "for" both: a reminder is set "in 20 minutes" and a timer is set
-# "for 10 minutes", and both are the same arithmetic.
-_IN = re.compile(
-    r"\b(?:in|for)\s+(\d+|" + "|".join(sorted(_WORD_NUMBERS, key=len, reverse=True)) +
-    r")\s*(" + "|".join(sorted(_UNITS, key=len, reverse=True)) + r")\b", re.I)
-
-_AT = re.compile(r"\bat\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b", re.I)
-
-# Matched separately and removed before the time is parsed, rather than being
-# an optional group on either side of it. As part of _AT it had to be written
-# twice, the trailing copy never fired because the preceding \s* had already
-# eaten its space, and "at 8 tomorrow" became eight tonight with the word
-# "tomorrow" left sitting in the reminder text.
-_TOMORROW = re.compile(r"\btomorrow\b", re.I)
-
-_REMIND = re.compile(
-    r"^\s*(?:can you\s+|please\s+)*(?:remind me|set a reminder|reminder)\b(.*)$", re.I)
-_TIMER = re.compile(
-    r"^\s*(?:can you\s+|please\s+)*(?:set (?:a|an)\s+|start (?:a|an)\s+)?timer\b(.*)$",
-    re.I)
-_LIST_REM = re.compile(r"^\s*(?:reminders|timers|list reminders|what.s set)\s*[?.]?\s*$", re.I)
-_CANCEL = re.compile(r"^\s*cancel\s+(?:reminder\s+)?(\d+|all)\s*$", re.I)
-
-
-def parse_when(text, now=None):
-    """(epoch, remaining_text) for a time phrase, or (None, text).
-
-    Handles "in 20 minutes" and "at 7pm", with "tomorrow" on either side of the
-    time. An "at" time that has already passed today rolls to tomorrow, because
-    someone saying "remind me at 7" at nine in the evening does not mean two
-    minutes ago and does not mean never.
-    """
-    now = now or time.time()
-
-    tomorrow = bool(_TOMORROW.search(text))
-    if tomorrow:
-        text = _TOMORROW.sub(" ", text)
-
-    m = _IN.search(text)
-    if m:
-        raw, unit = m.group(1).lower(), m.group(2).lower()
-        n = float(raw) if raw.isdigit() else _WORD_NUMBERS.get(raw, 0)
-        if n <= 0:
-            return None, text
-        return now + n * _UNITS[unit], (text[:m.start()] + " " + text[m.end():]).strip()
-
-    m = _AT.search(text)
-    if m:
-        hour, minute = int(m.group(1)), int(m.group(2) or 0)
-        ampm = (m.group(3) or "").lower()
-        if hour > 23 or minute > 59:
-            return None, text
-        if ampm == "pm" and hour < 12:
-            hour += 12
-        elif ampm == "am" and hour == 12:
-            hour = 0
-        # No am/pm and an hour that has already gone today is read as the
-        # evening: "remind me at 7" said at lunchtime means seven tonight, not
-        # tomorrow morning.
-        #
-        # Not when tomorrow was said, though. "tomorrow at 8" means eight in
-        # the morning, and shifting it by today's clock turned it into eight at
-        # night — the reminder arrives, twelve hours late, which is the failure
-        # that looks least like a failure.
-        lt = time.localtime(now)
-        assume_pm = (not ampm and not tomorrow and hour < 12
-                     and (lt.tm_hour, lt.tm_min) > (hour, minute)
-                     and hour + 12 > lt.tm_hour)
-        if assume_pm:
-            hour += 12
-        target = list(lt)
-        target[3], target[4], target[5] = hour, minute, 0
-        when = time.mktime(time.struct_time(tuple(target)))
-        if tomorrow or when <= now:
-            when += 86400
-        return when, (text[:m.start()] + " " + text[m.end():]).strip()
-
-    return None, text
-
-
-def clean_task(text):
-    """The reminder itself, with the connecting words taken off the front."""
-    t = re.sub(r"^\s*(?:to|that|about|it.s|its)\b\s*", "", text.strip(), flags=re.I)
-    t = re.sub(r"\s{2,}", " ", t).strip(" ,.;:")
-    return t
+# The grammar moved to timeparse.py so the router can set a reminder too. The
+# store, the sweep and the delivery all still live here: this is the only
+# process holding a Telegram key, and it is the only one that can reach him
+# when the page is shut.
+from timeparse import (_AT, _CANCEL, _IN, _LIST_REM, _REMIND, _TIMER,
+                       _TOMORROW, _UNITS, _WORD_NUMBERS, clean_task,
+                       parse_when)
 
 
 def add_reminder(chat, when, what):
@@ -521,8 +425,16 @@ async def watch_reminders(session):
             due = [r for r in rems if r.get("at", 0) <= now]
             if due:
                 for r in due:
-                    await send(session, r["chat"], f"Reminder: {r['what']}")
-                    log(f"reminder {r['id']} fired for chat {r['chat']}")
+                    # "*" is a reminder set from the web, which has no chat to
+                    # reply into. It goes to everyone enrolled: this is the
+                    # only process that can reach him at all, and a reminder
+                    # nobody receives is the one failure this whole path is
+                    # built to avoid.
+                    targets = (sorted(allowed()) if r.get("chat") == "*"
+                               else [r["chat"]])
+                    for chat in targets:
+                        await send(session, chat, f"Reminder: {r['what']}")
+                    log(f"reminder {r['id']} fired for {len(targets)} chat(s)")
                 # Re-read before writing: watch_health and watch_brief also
                 # write this file, and clobbering their keys would re-announce
                 # the health state or re-send the morning brief.
@@ -531,6 +443,16 @@ async def watch_reminders(session):
                         if r.get("id") not in {d["id"] for d in due}]
                 state["reminders"] = keep
                 save_state(state)
+            # Proof of life for the watchdog outside this container.
+            #
+            # watch_health covers the SERVICES; nothing covered the bridge
+            # itself. A hung poll loop keeps the process alive and the
+            # container "up", so `restart: unless-stopped` never fires and the
+            # first sign of trouble is a message that is never answered. This
+            # timestamp is what nova-watchdog.sh checks.
+            state = load_state()
+            state["heartbeat"] = int(time.time())
+            save_state(state)
         except Exception as exc:
             log(f"reminder sweep failed: {type(exc).__name__}: {exc}")
         await asyncio.sleep(15)
@@ -852,7 +774,7 @@ async def compose_followup(session):
         return None
 
     note = "\n".join(f"{d['day']}: {d['text']}" for d in days[-3:])
-    body = {"q": note, "voice": "marina", "agent": CHAT_AGENT,
+    body = {"q": note, "voice": "nova", "agent": CHAT_AGENT,
             "system_extra": FOLLOWUP_PROMPT}
     try:
         async with session.post(ASK_URL, json=body,
@@ -945,8 +867,20 @@ async def health_line(session):
     failing = h.get("failing") or []
     backup = (h.get("checks") or {}).get("backup") or {}
     age = backup.get("age_hours")
-    parts = ["Not well: " + ", ".join(failing) + " failing."] if failing \
-        else ["All services responding."]
+    if failing:
+        # A timeout is not a refusal. llama being slow under load and llama
+        # being down produce the same word in a status field and want opposite
+        # responses from him, so the distinction goes in the message.
+        checks = h.get("checks") or {}
+        slow = [n for n in failing
+                if "timeout" in str((checks.get(n) or {}).get("error", "")).lower()]
+        if slow and set(slow) == set(failing):
+            parts = ["Slow, not broken: " + ", ".join(slow)
+                     + " did not answer in time. Probably busy."]
+        else:
+            parts = ["Not well: " + ", ".join(failing) + " failing."]
+    else:
+        parts = ["All services responding."]
     if isinstance(age, (int, float)):
         parts.append(f"Last backup {age:.0f} hours ago"
                      + (f", {backup.get('notes')} notes." if backup.get("notes") else "."))
@@ -967,17 +901,48 @@ async def watch_health(session):
         try:
             state = load_state()
             now, line = await health_line(session)
-            if now != state.get("health"):
-                was = state.get("health")
-                if was is not None:      # never alert on first boot
+            settled = state.get("health")
+
+            if now == settled:
+                # Steady. Drop any half-seen change that did not repeat.
+                if state.get("health_pending") is not None:
+                    state = load_state()
+                    state.pop("health_pending", None)
+                    save_state(state)
+            elif state.get("health_pending") != now:
+                # First sighting of a change. Not announced yet.
+                #
+                # The health probe asks llama for a one-token completion, and
+                # llama serves one request at a time — so the probe queues
+                # behind whatever it is already doing. A long reply, a research
+                # note, or a test run pushes it past its 30s timeout and the
+                # monitor called that "down", messaged him, then messaged again
+                # to say it had recovered. Nothing had happened either time:
+                # llama was answering throughout, and every other service was
+                # responding in single-digit milliseconds.
+                #
+                # A real outage is still there on the next poll. A busy llama
+                # is not. So a change has to be seen TWICE before it is worth
+                # interrupting him, which costs one poll of delay on genuine
+                # bad news and removes the false alarms entirely.
+                state = load_state()
+                state["health_pending"] = now
+                save_state(state)
+                log(f"health looks {now}, waiting for confirmation")
+            else:
+                # Same reading twice: it is real.
+                if settled is not None:      # never alert on first boot
                     for chat in sorted(allowed()):
                         await send(session, chat,
                                    ("Recovered. " if now == "ok" else "Something is wrong. ")
                                    + line)
+                state = load_state()
                 state["health"] = now
+                state.pop("health_pending", None)
                 save_state(state)
-        except Exception:
-            pass
+                log(f"health confirmed {now}")
+        except Exception as exc:
+            log(f"health check failed: {type(exc).__name__}: {exc}")
         await asyncio.sleep(HEALTH_EVERY)
 
 
@@ -996,6 +961,27 @@ _NOTE_MAKE = re.compile(
     r"\b(?:note|jot|write (?:that|it|this) down|shopping list|make a list)\b"
     r"|^\s*(?:add|put|append|stick)\b.+\b(?:to|onto|into|in|on)\b.+"
     r"\b(?:note|list)\b", re.I)
+# Being told she is wrong, and making it stick.
+#
+# Without this, a correction lasted exactly one turn: he would say "no, it's a
+# T470 not a T480", she would accept it politely, and tomorrow she would say
+# T480 again because nothing had been written down. Auto-extraction is off for
+# good reasons — it filed her own hallucinations as facts about him — but a
+# correction he typed himself has none of that problem.
+#
+# Two shapes: "no, X" and "actually X". Both require a correction word at the
+# FRONT, because "actually" in the middle of a sentence is just a word.
+# The copula is REQUIRED, not optional, and "I'm" is not one of the accepted
+# openings. Written the loose way first, this matched "actually I'm fine
+# thanks" and would have filed "fine thanks" as a durable fact about him —
+# which is the exact failure that got automatic extraction switched off. A
+# correction has to look like a correction: no/actually, then a statement about
+# a THING. Disagreement about himself goes to the model like any other message.
+_CORRECTION = re.compile(
+    r"^\s*(?:no|nope|wrong|that.s wrong|that.s not right|actually)[,.]?\s+"
+    r"((?:it.s|its|that.s|thats|they.re|the|a|an)\b.{3,300}?)[.!]?\s*$"
+    r"|^\s*correction[:,]?\s*(.{4,300}?)[.!]?\s*$", re.I)
+
 _RESEARCH = re.compile(
     r"^\s*(?:research|look up|read up on|search (?:the )?web for|"
     r"what'?s the latest on)\s+(.+?)\s*[?.!]*\s*$", re.I)
@@ -1208,6 +1194,26 @@ async def answer(session, chat, text, spoken=False):
         return await send(session, chat,
                           f"Right — {what}, {when_words(when)}. (#{rid})")
 
+    # Told she is wrong. Written down, and said back to him.
+    #
+    # Confirmed rather than filed silently, because the capture can be a poor
+    # fact even when the match is right — and a memory he cannot see is one he
+    # cannot fix. Saying what was stored makes a bad one obvious immediately,
+    # while "forget" is still one message away.
+    m = _CORRECTION.match(text)
+    if m:
+        fact = (m.group(1) or m.group(2) or "").strip()
+        try:
+            async with session.post(CORRECT_URL, json={"right": fact}) as r:
+                out = await r.json()
+        except Exception as exc:
+            return await send(session, chat,
+                              f"I couldn't save that ({type(exc).__name__}).")
+        if not out.get("ok"):
+            return await send(session, chat,
+                              out.get("error") or "That didn't save.")
+        return await send(session, chat, f"Noted — {out['fact']}. I had it wrong.")
+
     # Checked BEFORE the note-writing gate: see the note on ordering above.
     if _NOTE_CHECK.search(text):
         try:
@@ -1275,7 +1281,7 @@ async def answer(session, chat, text, spoken=False):
     # any vault note retrieved for it, and what Nova remembers about him all go
     # to the hosted provider. NOVA_CHAT_AGENT=local keeps everything on the
     # laptop and costs only the register.
-    body = {"q": text, "voice": "marina", "agent": CHAT_AGENT,
+    body = {"q": text, "voice": "nova", "agent": CHAT_AGENT,
             "history": [{"role": r, "content": c}
                         for r, c in _history.get(chat, [])]}
     # Typing while it thinks, and stopped in a finally so a failure mid-answer

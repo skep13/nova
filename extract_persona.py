@@ -27,7 +27,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 # Named here rather than found inline, so adding a block to the page is a
 # one-word change instead of a silent omission. COACH was missed exactly that
 # way on the first pass, and nothing would have reported it.
-BLOCKS = ("PERSONA", "PLAIN", "CORE_RULES", "COACH")
+BLOCKS = ("PERSONA", "PERSONA_SHORT", "PLAIN", "CORE_RULES", "COACH")
 
 
 def js_block(html, name):

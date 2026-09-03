@@ -18,6 +18,8 @@ RUN apt-get update \
 RUN pip install --no-cache-dir aiohttp
 
 COPY nova_bridge.py /app/nova_bridge.py
+# Shared with the router: one time grammar, not two that drift.
+COPY timeparse.py /app/timeparse.py
 WORKDIR /app
 
 ENV NOVA_ASK_URL=http://remote:5003/ask \

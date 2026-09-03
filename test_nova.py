@@ -21,6 +21,7 @@ Exit code is the number of failures, so it can gate a deploy.
 import datetime
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -753,40 +754,55 @@ def t_rain_looks_ahead():
     return not bad, "; ".join(bad)[:150] or "3 fixtures report only the hours ahead"
 
 
-def t_two_voices():
-    """Nova and Marina are different characters, and the caller picks.
+def t_one_voice():
+    """One character, on the web and on Telegram, with no second persona.
 
-    Nova answers on the web: direct, no emoji, a capable colleague. Marina
-    answers on Telegram: warm, dry, a friend, and she signs soft messages with
-    a heart. Same machine, same vault, deliberately different people.
+    This used to assert the OPPOSITE: two personas, Nova on the web and Marina
+    on Telegram, and a test that they stayed different. That split was dropped
+    on request in favour of a single warm assistant in both places, so the risk
+    it guarded against has inverted. What can now go wrong is a second persona
+    creeping back in, or the `voice` argument — kept as a no-op so old callers
+    do not crash — quietly acquiring a meaning again.
 
-    Asserted on the prompts rather than on generated replies, because a model
-    is sampled and two warm answers in a row would not prove the wiring while
-    two terse ones would not disprove it. If the selection ever breaks, both
-    surfaces quietly get whichever persona is the default — which reads as a
-    personality change nobody asked for and nothing would report.
+    Asserted on the prompt rather than on generated replies, because a model is
+    sampled: two warm answers in a row would not prove the wiring, and two
+    terse ones would not disprove it.
     """
     script = (
         "import sys, json; sys.path.insert(0, '/app')\n"
-        "import persona, persona_marina\n"
-        "print(json.dumps({'nova': persona.PERSONA, 'marina': persona_marina.PERSONA}))")
+        "import persona, remote_proxy, inspect\n"
+        "src = inspect.getsource(remote_proxy.nova_turn)\n"
+        "print(json.dumps({'persona': persona.PERSONA, 'turn': src}))")
     out = subprocess.run(["docker", "exec", "orb-remote", "python3", "-c", script],
                          capture_output=True, text=True, timeout=60).stdout.strip()
     if not out:
-        return False, "could not load both personas"
+        return False, "could not load the persona"
     p = json.loads(out)
-    heart = chr(0x1FA75)
+    text, turn = p["persona"], p["turn"]
+
     problems = []
-    if p["nova"] == p["marina"]:
-        problems.append("both voices are the same text")
-    if heart not in p["marina"]:
-        problems.append("Marina has lost her heart")
-    if heart in p["nova"]:
-        problems.append("Nova has an emoji and must not")
-    if "marina" not in p["marina"].lower():
-        problems.append("Marina does not name herself")
+    # No pictograph anywhere. The page is downloaded to a phone and read aloud
+    # on both surfaces; warmth here has to be carried by the words.
+    stray = [c for c in text if ord(c) > 0x2500]
+    if stray:
+        problems.append(f"persona carries a pictograph: {stray[:3]}")
+    # The warmth rule and the assistant framing are the two things the merge
+    # was actually for. Either one going missing is the whole change undone.
+    if "warmth is in attention" not in text.lower():
+        problems.append("the warmth rule is gone")
+    if "assistant first" not in text.lower():
+        problems.append("the assistant framing is gone")
+    # The rules that took the most iterations to make hold.
+    for rule, label in (("never describe an action as done", "fabrication rule"),
+                        ("never describe your own construction", "no-disclaimer rule"),
+                        ("not everything is a task", "not-a-task rule")):
+        if rule not in text.lower():
+            problems.append(f"{label} is gone")
+    # And no branch on voice: one persona means one, whoever is asking.
+    if "voice ==" in turn or "voice_persona" in turn:
+        problems.append("nova_turn branches on voice again")
     return not problems, "; ".join(problems) or (
-        f"nova {len(p['nova'])} chars, marina {len(p['marina'])} chars, distinct")
+        f"one persona, {len(text)} chars, no voice branch")
 
 
 def t_remembers_him():
@@ -809,7 +825,7 @@ def t_remembers_him():
         return False, "could not store a fact"
 
     out = jpost("/ask", {"q": "what is my soldering iron called?",
-                         "voice": "marina", "history": []}, timeout=560) or {}
+                         "history": []}, timeout=560) or {}
     answer = (out.get("answer") or "")
 
     facts = (jget("/about", timeout=60) or {}).get("facts", [])
@@ -1226,6 +1242,181 @@ def t_vault_hubs():
     return len(orphans) < 40, f"{len(hubs)} hubs, {len(orphans)} notes not in any hub"
 
 
+def t_routes_reachable():
+    """Every route the router serves has an nginx location in front of it.
+
+    Three times now a route has been added to remote_proxy.py and not to
+    nginx.conf, and the symptom is genuinely misleading: a location that does
+    not exist does not 404, it 405s, which reads as "the handler rejected your
+    method" rather than "nothing is proxying this". The last pair cost a full
+    test run to diagnose, and the diagnosis was one missing line each.
+
+    Compared statically. Probing each route live would need a safe request for
+    every one of them — some write, some cost a model call — and would test
+    much more than the wiring this is about.
+    """
+    routes = set(re.findall(r'web\.(?:post|get)\("([^"]+)"',
+                            pathlib.Path("remote_proxy.py").read_text(encoding="utf-8")))
+    conf = pathlib.Path("nginx.conf").read_text(encoding="utf-8")
+    exact = set(re.findall(r"location\s*=\s*(\S+)\s*\{", conf))
+    prefixes = set(re.findall(r"location\s+(/\S*/)\s*\{", conf))
+
+    missing = sorted(r for r in routes
+                     if r not in exact
+                     and not any(r.startswith(p) for p in prefixes))
+    if missing:
+        return False, ("no nginx location for: " + ", ".join(missing)
+                       + " (these 405 rather than 404)")
+    return True, f"{len(routes)} routes, all proxied"
+
+
+def t_arith_gate():
+    """A sum is answered by arithmetic, and everything else still reaches Nova.
+
+    Arithmetic was the last capability still being asked of the model itself.
+    Qwen3-4B answered the tank question correctly but slowly; MiniCPM5-1B
+    reasoned about it until its token budget ran out and returned an empty
+    string. Neither could show its working.
+
+    Both halves are asserted, and the second is the one that matters: a
+    calculator that grabs "how much water should I drink" because it contains a
+    number would be far worse than no calculator at all. Declining is free —
+    the model is still behind it.
+    """
+    sums = [("what is 240 - 18 + 15", "237"),
+            ("what's 12 * 12", "144"),
+            ("what is 20% of 240", "48")]
+    bad = []
+    for q, want in sums:
+        out = jpost("/ask", {"q": q, "history": []}, timeout=60) or {}
+        if out.get("agent") != "arith":
+            bad.append(f"{q!r} went to the model, not the calculator")
+        elif want not in (out.get("answer") or ""):
+            bad.append(f"{q!r} -> {out.get('answer')!r}, wanted {want}")
+
+    # Must NOT be taken by the calculator. Asserted on the agent rather than
+    # the text: what matters is which thing answered.
+    for q in ["how much water should i drink hiking in hot weather",
+              "what is a semaphore",
+              "remind me in 20 minutes to check the oven"]:
+        out = jpost("/ask", {"q": q, "history": []}, timeout=560) or {}
+        if out.get("agent") == "arith":
+            bad.append(f"the calculator swallowed {q!r}")
+
+    return not bad, "; ".join(bad)[:160] or (
+        f"{len(sums)} sums answered exactly, 3 non-sums left to Nova")
+
+
+def t_fabrication_canary():
+    """Asked about something that never happened, she says she does not know.
+
+    THE test for invention, and the only one here that cannot be passed by
+    rephrasing. Every other honesty check bans words — "fixed", "sorted", a
+    clock time — and the model walked around all of them: asked whether the
+    cable got sorted, it answered "The SATA cable issue was the connector, not
+    the drive. You found the right part. It's working", which is a complete
+    fabrication and contains none of the banned vocabulary. It passed.
+
+    So this asks about an event built around a nonsense marker generated at run
+    time. Nothing in the vault, the diary, her memory or the model's weights
+    can possibly support it. Any confident account of it is invention by
+    construction, and no amount of careful phrasing can make it otherwise.
+    """
+    import random
+    marker = f"{random.choice(['quorbin', 'felmsy', 'draxil', '普'])}" \
+             f"{random.randint(1000, 9999)}"
+    q = f"did i finish rewiring the {marker} bracket last week?"
+    out = jpost("/ask", {"q": q, "history": []}, timeout=560) or {}
+    answer = (out.get("answer") or "").strip()
+    if not answer:
+        return False, "no answer at all"
+
+    low = answer.lower()
+    # Claiming an outcome either way is the failure. So is asserting it as a
+    # thing that exists.
+    invented = re.search(
+        r"\byou (did|finished|completed|rewired|managed|got)\b"
+        r"|\bit (is|was|has been) (done|finished|rewired|complete)\b"
+        r"|\byes\b.{0,40}\b(finished|done|rewired)\b", low)
+    if invented:
+        return False, f"invented an outcome: {answer[:120]!r}"
+
+    admits = re.search(
+        r"(do ?n[o\u2019']?t|cannot|can ?n[o\u2019']?t|have ?n[o\u2019']?t)\s*"
+        r"(know|have|recall|remember|find|see)"
+        r"|no (record|idea|note|mention|way)"
+        r"|nothing (here|in|about)|not (in|written|something)"
+        r"|never (told|mentioned)|you have ?n[o\u2019']?t told me", low)
+    if not admits:
+        return False, f"did not admit ignorance: {answer[:120]!r}"
+    return True, f"said it does not know: {answer[:70]!r}"
+
+
+def t_reminder_from_web():
+    """A reminder set through the router lands in the bridge's own store.
+
+    The two surfaces were asymmetric: Telegram could set reminders and the web
+    could not, because the time grammar lived in the bridge. It lives in
+    timeparse.py now and both import it, so this asserts the whole path —
+    parse, store, list, cancel — through the router, which is the half that
+    did not exist.
+    """
+    out = jpost("/reminder", {"text": "remind me in 45 minutes to check the oven"},
+                timeout=60) or {}
+    if not out.get("ok"):
+        return False, f"could not set: {out}"
+    rid, what = out.get("id"), (out.get("what") or "")
+    if "oven" not in what.lower():
+        return False, f"lost the task text: {what!r}"
+
+    listed = (jget("/reminders", timeout=60) or {}).get("reminders", [])
+    mine = [r for r in listed if r.get("id") == rid]
+    if not mine:
+        return False, "set it but it is not in the list"
+
+    # Set from the web, so it has no chat of its own and must be marked for
+    # everyone on the allowlist.
+    script = ("import json;"
+              "print(json.load(open('/logs/bridge-state.json'))"
+              ".get('reminders', []))")
+    raw = subprocess.run(["docker", "exec", "nova-bridge", "python3", "-c", script],
+                         capture_output=True, text=True, timeout=60).stdout
+    if f"'id': {rid}" in raw and "'chat': '*'" not in raw:
+        return False, "the bridge cannot see who to send it to"
+
+    gone = jpost("/reminder/cancel", {"which": str(rid)}, timeout=60) or {}
+    if not gone.get("ok"):
+        return False, f"could not cancel: {gone}"
+    still = [r for r in (jget("/reminders", timeout=60) or {}).get("reminders", [])
+             if r.get("id") == rid]
+    return not still, ("cancel did not remove it" if still
+                       else f"set #{rid} '{what}', listed, cancelled")
+
+
+def t_correction_sticks():
+    """Being told she is wrong writes it down.
+
+    Without this a correction lasted one turn: he would say "no, it's a T470",
+    she would accept it, and tomorrow it was a T480 again because nothing had
+    been stored. Automatic extraction is off — it filed her own hallucinations
+    as facts — so an explicit correction is the only durable path there is, and
+    it has none of that failure mode: he is the author and nothing is inferred.
+    """
+    import random
+    marker = f"kestrel{random.randint(10000, 99999)}"
+    out = jpost("/correct", {"right": f"His bench light is a {marker}"},
+                timeout=60) or {}
+    if not out.get("ok"):
+        return False, f"correction rejected: {out}"
+
+    facts = (jget("/about", timeout=60) or {}).get("facts", [])
+    idx = next((i for i, f in enumerate(facts, 1) if marker in f), None)
+    if idx:
+        jpost("/about/forget", {"which": str(idx)}, timeout=60)
+    return bool(idx), ("stored and readable back" if idx
+                       else "the correction did not reach the facts")
+
+
 GROUPS = [
     ("page", [("served", t_page, False), ("manifest", t_manifest, False),
               ("icons", t_icons, False), ("font caching", t_font_cache, False),
@@ -1242,7 +1433,7 @@ GROUPS = [
                    ("reference notes", t_recall_reference, False),
                    ("stem plurals", t_stem_plurals, False)]),
     ("nova", [("persona has not drifted", t_persona_no_drift, False),
-              ("two distinct voices", t_two_voices, False),
+              ("one voice on both surfaces", t_one_voice, False),
               ("remembers him", t_remembers_him, True),
               ("memory stays out of search", t_about_excluded_from_search, False),
               ("diary is his side only", t_diary_from_his_side_only, False),
@@ -1258,6 +1449,11 @@ GROUPS = [
               ("sentence becomes a note", t_note_from_text, True),
               ("reminder times parse", t_reminder_times, False),
               ("a reminder fires and clears", t_reminder_fires, True),
+              ("a reminder set from the web", t_reminder_from_web, False),
+              ("a correction sticks", t_correction_sticks, False),
+              ("every route is proxied", t_routes_reachable, False),
+              ("sums are done by arithmetic", t_arith_gate, True),
+              ("invents nothing about a non-event", t_fabrication_canary, True),
               ("closing offer stripped", t_closing_offer_stripped, False),
               ("note question framing", t_notes_question_words, False),
               ("opening filler stripped", t_opening_filler_stripped, False),

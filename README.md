@@ -35,6 +35,38 @@ the LAN rather than to localhost. Nothing is published to the internet;
 `tailscale serve` is tailnet-only (that would be `funnel`, which must never be
 enabled while the WebDAV endpoint is unauthenticated).
 
+## Reminders, corrections and the watchdog
+
+Reminders can be set from either surface. The time grammar lives in
+`timeparse.py` and is imported by both the router and the bridge, so "in twenty
+minutes" and "at half seven" mean the same thing wherever they are typed. The
+store is the bridge's state file either way, and the bridge does the delivering
+— it holds the only Telegram key, which is what lets a reminder reach him when
+the page is shut.
+
+    POST /reminder         {"text": "remind me in 20 minutes to check the oven"}
+    GET  /reminders
+    POST /reminder/cancel  {"which": 3}   # or "all"
+
+Corrections are the safe half of a feature whose automatic half was switched
+off. `NOVA_AUTO_REMEMBER` stays off because the extractor filed Nova's own
+answers as facts — including a hallucinated time that then came back as truth.
+An explicit correction has none of that: he is the author, and nothing is
+inferred.
+
+    POST /correct          {"right": "it's a T470", "wrong": "T480"}
+
+On Telegram the same thing is a message beginning "no, it's ..." or "actually
+the ...", and what gets stored is read straight back to him, because a memory
+he cannot see is one he cannot fix.
+
+**The watchdog runs outside the bridge.** `watch_health` inside it reports on
+the services; nothing reported on the bridge itself, and a wedged poll loop
+keeps the container "up" so `restart: unless-stopped` never fires. The bridge
+now stamps a heartbeat every sweep and `nova-watchdog.timer` in LXC 101
+restarts it if the stamp goes stale. It recovers rather than alerts, because
+the only process that could send the alert is the broken one.
+
 ## Measured on this hardware
 
 | | Cold (first request after start) | Warm |
