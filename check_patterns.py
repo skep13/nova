@@ -13,7 +13,7 @@ import pathlib
 import re
 import sys
 
-sys.path.insert(0, r"C:\Users\the user\orb-chat")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.argv = ["x", "--quick"]
 import test_personality as T  # noqa: E402
 

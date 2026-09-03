@@ -499,12 +499,12 @@ def describe(code):
 
 
 # A UK postcode is how a British person says where they live, and Open-Meteo's
-# geocoder indexes settlements — it returns nothing at all for "SW1A 1AA". So
-# postcodes go to postcodes.io instead: free, no key, no account, and the
-# authoritative source rather than a guess.
+# geocoder indexes settlements — it returns nothing at all for a full postcode
+# like "SW1A 1AA". So postcodes go to postcodes.io instead: free, no key, no
+# account, and the authoritative source rather than a guess.
 #
-# Both halves optional-spaced, and the outcode alone accepted, because "SW1A" is
-# a perfectly good answer to where are you and is less precise by nature.
+# Both halves optional-spaced, and the outcode alone accepted, because "SW1A"
+# is a perfectly good answer to where are you and is less precise by nature.
 _UK_POSTCODE = re.compile(r"^\s*([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})?\s*$", re.I)
 
 
@@ -529,9 +529,10 @@ async def geocode_postcode(session, text):
     # str for a full postcode, LIST for an outcode — an outcode spans several
     # districts and postcodes.io says so by changing the type of the field.
     #
-    # Taking the first of the list is how "SW1A" came back labelled
-    # "Herefordshire, England" for a Welsh postcode: it does straddle the
-    # border, and the first entry is not the answer, it is just first. When the
+    # Taking the first of the list is how an outcode came back labelled with
+    # the WRONG county for a postcode that straddles a border: the district
+    # genuinely spans two, and the first entry is not the answer, it is just
+    # first. When the
     # list disagrees with itself the honest label is no label.
     def one(v):
         if isinstance(v, list):

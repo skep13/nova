@@ -2393,7 +2393,7 @@ async def complete(session, agent, messages, max_tokens, temperature=None):
 # it what it has.
 # --- what she knows about him ------------------------------------------------
 #
-# Until now: nothing. 1424 notes, none of them about the user, six turns of history
+# Until now: nothing. 1424 notes, none of them about HIM, six turns of history
 # held in RAM and lost on restart. A friend who forgets everything between
 # conversations is not a friend however warmly it phrases things, and no amount
 # of persona fixes that — which is why the tone work kept hitting a ceiling.
@@ -2405,7 +2405,9 @@ async def complete(session, agent, messages, max_tokens, temperature=None):
 #
 # Excluded from retrieval by its tag and injected on every turn instead: it is
 # context about who is speaking, not an article that might answer a question.
-ABOUT_FILE = "about-user.md"
+# Named generically, and overridable: the deployed box may still
+# hold the older filename.
+ABOUT_FILE = os.environ.get("NOVA_ABOUT_FILE", "about-user.md")
 ABOUT_MAX = 40                 # facts; past this the oldest are dropped
 ABOUT_FACT_MAX = 160           # characters each
 

@@ -808,7 +808,7 @@ def t_one_voice():
 def t_remembers_him():
     """A fact told once is used in a conversation with no history.
 
-    Until this existed she knew nothing about the user at all: 1424 notes, none of
+    Until this existed she knew nothing about him at all: 1424 notes, none of
     them about him, and six turns of history held in RAM and lost on restart. A
     friend who forgets everything between conversations is not a friend however
     warmly it phrases things, which is why the tone work kept hitting a
