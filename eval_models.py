@@ -44,9 +44,22 @@ TESTS = [
         "user": "How much water should someone drink per day while hiking in hot weather?",
         # The 1.5B answered "1-2 litres per day", which is low enough to be
         # dangerous, and is why this device runs a 3B at all.
-        "check": lambda t: bool(re.search(r"\b([2-9]|1[0-9])(\.\d)?\s*(-|–|to)?\s*\d*\.?\d*\s*(l\b|lit)", t.lower()))
-                           and not re.search(r"\b1\s*(-|–|to)\s*2\s*lit", t.lower()),
-        "why": "gives a safe volume, not 1-2 litres",
+        #
+        # The unit matters as much as the number, and the first version of this
+        # check ignored it. Qwen3-4B answered "1 to 2 litres per hour of
+        # hiking" — correct, and safe — and was marked as giving the dangerous
+        # answer, because the pattern looked for "1-2 lit" and found it. A
+        # check that condemns the right answer for resembling the wrong one is
+        # worse than no check: it argues for replacing a model that was fine.
+        # (?<![\d.]) because \b does not help inside a decimal: "0.5 litres"
+        # contains a word boundary before the 5, so the pattern read it as
+        # "5 litres" and passed half a litre a day as a safe volume. The one
+        # number this test exists to catch is a small one.
+        "check": lambda t: bool(re.search(r"(?<![\d.])([2-9]|1[0-9])(\.\d)?\s*(-|–|to)?\s*\d*\.?\d*\s*(l\b|lit)", t.lower()))
+                           and not re.search(
+                               r"\b1\s*(-|–|to)\s*2\s*lit\w*\s*(per|a|each)?\s*day",
+                               t.lower()),
+        "why": "gives a safe volume, not 1-2 litres A DAY",
     },
     {
         "id": "no-markdown",
@@ -126,7 +139,15 @@ TESTS = [
 ]
 
 
-def ask(base, system, user, max_tokens=400):
+# 1200, not 400.
+#
+# A model with a think mode spends this budget on reasoning FIRST and the
+# answer second. MiniCPM5-1B used all 400 tokens thinking about the tank
+# arithmetic and returned an empty answer, which scored as a failure and was
+# actually a measurement of the cap. llama.cpp reports the reasoning
+# separately, in reasoning_content, so the answer itself stays clean — but it
+# still has to be given room to arrive.
+def ask(base, system, user, max_tokens=1200):
     body = {"messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
             "max_tokens": max_tokens, "stream": False, "temperature": 0.3}
@@ -136,9 +157,14 @@ def ask(base, system, user, max_tokens=400):
     t = time.time()
     d = json.loads(urllib.request.urlopen(req, timeout=900).read())
     el = time.time() - t
-    txt = d["choices"][0]["message"]["content"]
+    msg = d["choices"][0]["message"]
+    txt = msg.get("content") or ""
+    # Counted and reported, because on two cores a model that thinks for 800
+    # tokens before answering is slower in the only unit that matters to him —
+    # how long he waits — however good its tokens per second look.
+    think = len(msg.get("reasoning_content") or "")
     tok = (d.get("usage") or {}).get("completion_tokens", 0)
-    return txt, tok, el
+    return txt, tok, el, think
 
 
 def main():
@@ -156,11 +182,13 @@ def main():
 
     passed = 0
     toks = els = 0
+    thought = 0
     for t in TESTS:
         try:
-            txt, tok, el = ask(base, t["system"], t["user"])
+            txt, tok, el, think = ask(base, t["system"], t["user"])
             toks += tok
             els += el
+            thought += think
             ok = bool(t["check"](txt))
             passed += ok
             print(f"    {'PASS' if ok else 'FAIL'}  {t['id']:20} {t['why']}")
@@ -171,7 +199,10 @@ def main():
 
     rate = toks / els if els else 0
     print(f"    ----")
-    print(f"    score {passed}/{len(TESTS)}   {rate:.2f} tok/s   ({toks} tokens in {els:.0f}s)")
+    print(f"    score {passed}/{len(TESTS)}   {rate:.2f} tok/s   "
+          f"({toks} tokens in {els:.0f}s"
+          + (f", {thought} chars of hidden reasoning)" if thought else ")"))
+    print(f"    {els / len(TESTS):.0f}s per answer, which is what he waits")
     return passed
 
 

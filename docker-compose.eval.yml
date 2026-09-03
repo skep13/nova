@@ -1,0 +1,119 @@
+# A second model, alongside the live one, purely to be measured.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.eval.yml up -d llama-eval
+#     python3 eval_models.py http://llama-eval:8080 "MiniCPM5-1B"
+#     python3 eval_models.py http://llama:8080      "Qwen3-4B"
+#     docker compose -f docker-compose.yml -f docker-compose.eval.yml down llama-eval
+#
+# Separate file so nothing here can reach the live stack by accident: the
+# candidate never becomes an agent the router knows about, and removing it is
+# one command that cannot touch orb-llama.
+#
+# The last model change was decided by a single question — the 1.5B said to
+# drink "1-2 litres per day" hiking in heat, which is low enough to hurt
+# someone — and that question is test 1 in eval_models.py. It is the bar any
+# candidate has to clear before speed is even discussed.
+services:
+  llama-eval:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: orb-llama-eval
+    # NOT restart: unless-stopped. This is a temporary measurement and it
+    # should not come back after a reboot having been forgotten about.
+    restart: "no"
+    command: >
+      -hf openbmb/MiniCPM5-1B-GGUF:Q4_K_M
+      -c 4096
+      -t 2
+      --jinja
+      --reasoning off
+      --reasoning-budget 0
+      --temp 0.7
+      --top-p 0.95
+      --host 0.0.0.0
+      --port 8080
+    # --jinja is required: OpenBMB's own llama-server line uses it, because the
+    # model needs its embedded chat template rather than llama.cpp's guess.
+    #
+    # --temp 0.7 is THEIR no-think recommendation, not the 0.6 measured here.
+    # Nova runs 0.6 because the banned stock-assistant phrasings are what the
+    # model falls back on when sampling wanders, and that was measured on a
+    # different model — so the candidate is judged at the setting its authors
+    # recommend, and re-tuned afterwards if it is ever adopted.
+    #
+    # --reasoning off, MEASURED as the thing that decides this model.
+    #
+    # OpenBMB's docs do not mention it, but llama-server has the flag (and
+    # --reasoning-budget 0 alongside it, which ends thinking immediately).
+    # With thinking on, MiniCPM5-1B scored 7/9 and spent 17,486 characters
+    # reasoning across nine questions — returning a COMPLETELY EMPTY answer to
+    # the tank arithmetic at both 400 and 1200 max_tokens, because it reasoned
+    # until the budget was gone. Its 6x tokens-per-second advantage became a
+    # 21% improvement in the only unit that matters: 26s per answer against
+    # the 4B's 33s.
+    #
+    # So this is the version actually worth comparing. Thinking never leaked
+    # into the answer either way — llama.cpp puts it in reasoning_content —
+    # so the cost was always waiting, never correctness.
+    volumes:
+      - ./models-eval:/root/.cache/llama.cpp
+    deploy:
+      resources:
+        limits:
+          # The live llama holds 4.3 GiB of a 5 GiB cap and the box has about
+          # 1.8 GiB free. A 1B at Q4_K_M is roughly 700 MB of weights, so this
+          # fits — but only just.
+          #
+          # -c was 2048, which was enough for eval_models.py and NOT enough for
+          # the real thing: the full system prompt is 2050 tokens before the
+          # question is added, because the persona alone is about 1400. The
+          # first personality run against the candidate died on exactly that.
+          # 4096 holds it with room for a reply; production runs 6144, so this
+          # is close to but not identical to live conditions.
+          #
+          # This box has OOM-killed llama before. The cap is here so that if
+          # the estimate is wrong it is the CANDIDATE that dies, not the model
+          # answering his messages.
+          memory: 1300m
+    networks:
+      - default
+
+  # A second ROUTER, pointed at the candidate model.
+  #
+  # eval_models.py measures a bare model; this measures the SYSTEM — persona,
+  # retrieval, the deterministic filters and all — which is the thing actually
+  # in use. It is also the only way to answer the question that decides a small
+  # model: the persona is 5.3 KB of about twenty rules, and whether a 1B holds
+  # them is exactly where small models usually fail.
+  #
+  # Shares the vault READ-ONLY and writes its logs nowhere the live stack
+  # reads, so a candidate cannot alter what he actually has.
+  remote-eval:
+    image: orb-remote:latest
+    container_name: orb-remote-eval
+    restart: "no"
+    environment:
+      - LOCAL_URL=http://llama-eval:8080/v1/chat/completions
+      - MEM_DIR=/mem
+      - PLACES_FILE=/data/places.json
+      # No keys mounted, so the hosted agents are unreachable and every
+      # request falls back to local — which is the point of the exercise.
+      - NOVA_AUTO_REMEMBER=0
+      # The whole point of this slice: 1145 chars of persona instead of 5277.
+      # A 1B scored 15/20 on the long one and invented a side project when
+      # asked what it had been doing. Everything the short version drops is
+      # enforced in code after the model speaks, so this is the same character
+      # with the remembering taken off the model.
+      - NOVA_SHORT_PERSONA=1
+      # Nothing a candidate writes may reach the real vault, inbox included.
+      - NOVA_RESEARCH_WRITES=off
+    volumes:
+      - ./mem:/mem:ro
+      - ./data:/data:ro
+      - ./logs-eval:/logs
+    deploy:
+      resources:
+        limits:
+          # The live router runs in 384m holding the same vault index.
+          memory: 384m
+    networks:
+      - default
