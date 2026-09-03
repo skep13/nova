@@ -1,0 +1,15 @@
+# Shell scripts and unit files run on Linux, and are edited on Windows.
+#
+# git's autocrlf turned run-eval.sh into CRLF on checkout, and dash reads
+# "set -eu\r" as an illegal option. The script died on line 13 with a message
+# that says nothing about line endings. These files are LF wherever they live.
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+Dockerfile* text eol=lf
+*.conf text eol=lf
+
+# Python is read by the interpreter, which does not care, but the containers
+# do run it on Linux and a stray CR in a heredoc has bitten before.
+*.py text eol=lf
+*.yml text eol=lf
