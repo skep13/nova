@@ -1,0 +1,15 @@
+[Unit]
+# Restarts the Telegram bridge when it stops stamping its heartbeat. Runs in
+# LXC 101, OUTSIDE every container, because a watchdog that lives inside the
+# thing it watches goes down with it.
+Description=Nova bridge watchdog
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nova-watchdog.sh
+# It restarts one container and appends to one log; nothing else.
+ReadWritePaths=/opt/orb/logs
+ProtectHome=yes
+NoNewPrivileges=yes

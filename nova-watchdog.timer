@@ -1,0 +1,13 @@
+[Unit]
+Description=Check the Nova bridge heartbeat every minute
+
+[Timer]
+# A minute is the useful resolution: the bridge stamps every 15 seconds and the
+# staleness limit is 120, so a genuine hang is caught inside three minutes
+# without the check itself becoming a load on two cores.
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
