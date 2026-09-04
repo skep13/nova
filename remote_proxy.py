@@ -918,8 +918,16 @@ def split_identifier(word):
 def key_terms(q):
     # Underscores are kept, then handled by split_identifier. Everything else
     # that is not a letter or digit still becomes a space.
-    q = re.sub(r"[^a-zA-Z0-9_\s]", " ", q or "")
+    # Joined forms of hyphenated compounds, taken BEFORE the punctuation is
+    # flattened - otherwise "wi-fi" in a question becomes "wi" and "fi", both
+    # two letters, both dropped, and the question loses its subject entirely.
     out = []
+    for raw in re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", q or ""):
+        joined = raw.replace("-", "").lower()
+        if len(joined) > 2 and joined not in out:
+            out.append(joined)
+
+    q = re.sub(r"[^a-zA-Z0-9_\s]", " ", q or "")
     for raw in q.split():
         for w in split_identifier(raw):
             w = w.lower()
@@ -1032,6 +1040,15 @@ def _words(text):
     for raw in re.findall(r"[A-Za-z0-9_]+", text):
         for w in split_identifier(raw):
             out.add(_stem(w.lower()))
+    # Hyphenated compounds, also indexed joined.
+    #
+    # "Wi-Fi" splits on the hyphen into "wi" and "fi", and a search for "wifi"
+    # matches neither - so the note titled "Wi-Fi: channels, bands and why it
+    # drops" was invisible to the word wifi and lost to "Side-channel attack",
+    # which had wifi in its body. The same hole covers e-mail, self-hosted,
+    # real-time and every other compound anyone writes with a hyphen.
+    for raw in re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", text):
+        out.add(_stem(raw.replace("-", "").lower()))
     return out
 
 
@@ -1096,7 +1113,15 @@ _OPERATIONAL = re.compile(
     r"\bhow (?:do|would|can|should) (?:i|you|we)\b|\bhow (?:much|many|long|hot)\b"
     r"|\bwhat (?:temperature|port|ratio|flag|command|setting|size|speed)\b"
     r"|\bwhy (?:is|does|did|do|won't|wont|isn't|cant|can't)\b"
-    r"|\bhow to\b|\bsyntax for\b|\bcommand for\b|\bwhat does .{1,30}\b(?:do|mean|show)\b")
+    r"|\bhow to\b|\bsyntax for\b|\bcommand for\b|\bwhat does .{1,30}\b(?:do|mean|show)\b"
+    # Problem statements. Someone reporting a fault wants the note that says
+    # what to do about it, not the article that defines the noun - and this is
+    # how people actually ask, far more often than they form a question.
+    r"|\bmy \w+(?: \w+)? (?:is|are|was|were|has|have|had|keeps?|won'?t|will not|is ?n'?t)\b"
+    r"|\b(?:is|are|has|have) ?n[o']?t working\b"
+    r"|\bwon'?t (?:start|work|turn|boot|open|close|light|fire|charge)\b"
+    r"|\bkeeps? (?:failing|tripping|dropping|cutting out|crashing|freezing)\b"
+    r"|\bstopped working\b|\bnot working\b|\bwill not (?:start|work|boot)\b")
 
 
 # Does this question want CODE?
@@ -1140,6 +1165,15 @@ def search_vault(query, allow_generated=True):
     # one-word title is worth linking. One definition, two callers.
     common_df = total * 0.08
     operational = bool(_OPERATIONAL.search(query.lower()))
+    # How much information each query term carries, and the total. Coverage is
+    # measured against this rather than against the word count: "low" and
+    # "boiler" are one word each and are not worth the same.
+    term_rarity = {w: math.log(1 + total / max(1, df.get(w, 1))) for w in terms}
+    query_information = sum(term_rarity.values()) or 1.0
+    # Average note length, for the length normaliser below. Computed here
+    # rather than cached because _vault is rebuilt whenever the vault changes
+    # and a stale average is worse than a recomputed one on 1,500 notes.
+    avg_len = (sum(len(n["_bw"]) for n in _vault) / total) or 1.0
     # Asked WITHOUT any code signal, source notes are not what he wants.
     wants_code = bool(_CODEY.search(query))
 
@@ -1148,9 +1182,11 @@ def search_vault(query, allow_generated=True):
         if not allow_generated and n.get("generated"):
             continue
         score = 0.0
+        matched_information = 0.0
         for w in terms:
             if w not in n["_tw"] and w not in n["_bw"] and w not in n["_al"]:
                 continue
+            matched_information += term_rarity[w]
             # Inverse document frequency: a word in three notes says far more
             # about which note you want than a word in two hundred.
             rarity = math.log(1 + total / max(1, df.get(w, 1)))
@@ -1179,6 +1215,28 @@ def search_vault(query, allow_generated=True):
         # hand-written field notes, which lead with what to DO and are the
         # reason this device exists. Being generated is a reason to rank
         # second, not a reason to be invisible.
+        # How much of the QUESTION this note actually answers.
+        #
+        # Without this the score is a pure sum, and a note matching one title
+        # word beats a note matching four body words - which is how "black
+        # mould in the corner of the bedroom" returned the article on Mold
+        # rather than the note on damp, and how a question about a refund
+        # returned the article on washing machines.
+        #
+        # Weighted by rarity rather than by count. Counting words equally let
+        # "low" - the least informative word in "my boiler pressure is low" -
+        # cost the operational note two thirds of a score it was otherwise
+        # winning, because an encyclopedia article happened to contain it.
+        score *= matched_information / query_information
+
+        # Length normalisation, BM25-style.
+        #
+        # A long note has more chances to contain any given word. Without this,
+        # "Central bank" (320 tokens) and "Washing machine" (292) beat the
+        # notes that actually answered the question (120 and 114), purely by
+        # having more surface area. b = 0.75 is the BM25 default.
+        score /= (1 - LENGTH_B) + LENGTH_B * (len(n["_bw"]) / avg_len)
+
         if n.get("generated"):
             score *= 0.7
         # A source note answering a question with no code in it at all.
@@ -1229,6 +1287,25 @@ EMBED_CHARS = int(os.environ.get("EMBED_CHARS", "1200"))
 # 5.7-8.1.
 # Measured over 20 paraphrased queries on this vault. Above 12 the lexical hit
 # was right every time; below it, it was right about half the time.
+# How hard length normalisation bites. 0 disables it, 1 divides in full
+# proportion to length.
+#
+# 0.25, MEASURED, not the 0.75 BM25 default. Swept against the 26 cases in
+# test_retrieval.py on the real vault:
+#
+#   b=0.00   25/26   "from my bank" -> Friendship. Long articles still win
+#   b=0.15   26/26
+#   b=0.25   26/26   <- centre of the working band
+#   b=0.35   26/26
+#   b=0.45   25/26   "what is tls" -> a cheatsheet, not the article
+#   b=0.75   24/26   the default, and also loses search_vault to recall
+#
+# There is a real window and the textbook value sits outside it. Too little and
+# a 320-token article beats the 120-token note that answers the question; too
+# much and a short note wins on brevity alone. This corpus mixes an imported
+# encyclopedia with hand-written notes a third the length, which is why the
+# usual constant does not transfer.
+LENGTH_B = float(os.environ.get("LENGTH_B", "0.25"))
 LEXICAL_STRONG = float(os.environ.get("LEXICAL_STRONG", "12.0"))
 # Floor for returning anything at all.
 SEMANTIC_MIN = float(os.environ.get("SEMANTIC_MIN", "0.62"))
