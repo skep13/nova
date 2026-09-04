@@ -46,6 +46,18 @@ CASES = [
     ("how does search_vault score notes", "search_vault"),
     ("what does gather_sources do", "gather_sources"),
 
+    # --- paraphrases: no shared vocabulary with the note that answers -----
+    #
+    # These are the cases neither ranker gets alone. For the first, lexical
+    # returns "Nail" and semantic returns "Nail biting", with the two notes
+    # that actually answer it sitting third and fourth on similarity, bunched
+    # inside 0.03 of the wrong ones.
+    ("i cut myself badly and it will not stop", "leeding"),
+    ("water coming through the ceiling", "Damp"),
+    ("my house feels wet and there are black spots", "Damp"),
+    ("the thing that stops you being electrocuted", "ircuit"),
+    ("what happens to your body at very high places", "Altitude"),
+
     # --- the safety-critical ones from the field batch ---------------------
     ("how do i stop severe bleeding", "Bleeding"),
     ("someone is bleeding badly what do i do", "Bleeding"),
