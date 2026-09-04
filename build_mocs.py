@@ -25,6 +25,8 @@ import pathlib
 import re
 import sys
 
+import vaultpaths
+
 VAULT = pathlib.Path("/opt/orb/mem")
 NOW = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -548,6 +550,48 @@ def read_meta(p):
 # unscoped name would have all six overwrite one file, leaving five domain hubs
 # pointing at a list of someone else's notes. Silent, and only visible in the
 # graph.
+# A note is filed under the first of these tags it carries, so the ORDER is the
+# priority: a note tagged both #ai and #security is security. The first block
+# is the domain names themselves and is the original list, unchanged.
+#
+# The second block is aliases, and it exists because 40 notes were orphans.
+# The note builders added since — money, home, everyday, field — tag by subject
+# rather than by domain, so notes came through carrying #cooking, #consumer or
+# #medical and matched nothing here at all. A tag that matches nothing means
+# domain None, which means `continue`, which means the note is never written
+# into a hub and hangs unreachable in the graph.
+#
+# Aliases come AFTER every real domain name, so they can only ever be a
+# fallback: a note tagged [uk, sci] is still Science. Nothing that was being
+# filed before is filed differently now.
+DOMAIN_OF = {}
+for _d, _, _ in DOMAINS:
+    DOMAIN_OF[_d] = _d
+DOMAIN_PRIORITY = list(DOMAIN_OF)
+
+# tag -> the domain hub it belongs under. Kept consistent with the folder
+# routing in build_folders.py, so the hub a note appears in and the directory
+# it sits in tell the same story.
+ALIASES = {
+    "medical": "health",
+    "emergency": "field",
+    "cooking": "kitchen",
+    # "Everyday Life" is described as food, money, paperwork, the house and
+    # the car, which is precisely what this group of tags is.
+    "money": "life", "consumer": "life", "work": "life", "housing": "life",
+    "admin": "life", "uk": "life", "post": "life", "travel": "life",
+    "vehicles": "life", "bike": "life", "security-personal": "life",
+    "diy": "household", "tools": "household", "electrical": "household",
+    "water": "household", "shelter": "household",
+    "computing": "cs",
+    "conversion": "everyday", "time": "everyday", "weather": "everyday",
+    "rope": "skills", "words": "skills",
+}
+for _tag, _dom in ALIASES.items():
+    if _tag not in DOMAIN_OF:
+        DOMAIN_OF[_tag] = _dom
+        DOMAIN_PRIORITY.append(_tag)
+
 REFERENCE_SUFFIX = "-quick-reference"
 REFERENCE_DESC = ("Lookup tables, flags and values — written to be consulted "
                   "mid-task rather than read.")
@@ -594,24 +638,25 @@ def frontmatter(title, tags):
 
 
 def main():
-    tm = VAULT / "threat-model.md"
+    # Every write below goes through this. The vault is in folders, so
+    # VAULT / "moc-security.md" no longer names the existing hub - it names a
+    # new file that would collide with hubs/moc-security.md on basename, and
+    # the embedding cache is keyed on basename. Resolved once: 1,502 notes is
+    # a fast walk, but not one worth doing 141 times.
+    here = vaultpaths.index(VAULT)
+
+    tm = vaultpaths.find_note(VAULT, "threat-model.md", here)
     if not tm.exists():
         tm.write_text(THREAT_MODEL.format(now=NOW), encoding="utf-8")
 
     buckets = {}
-    for p in sorted(VAULT.glob("*.md")):
+    for p in sorted(vaultpaths.notes(VAULT)):
         if p.stem.startswith("moc-") or p.stem == "index":
             continue
         title, tags = read_meta(p)
         if "moc" in tags:
             continue
-        domain = next((d for d in ("security", "ai", "cs", "field", "home", "make",
-                                   "life", "health", "mind", "world", "sci",
-                                   "code", "ops", "wellbeing",
-                                   "culture", "nature", "skills", "nova", "web",
-                                   "kitchen", "household", "garden",
-                                   "sport", "everyday", "selfwork")
-                       if d in tags), None)
+        domain = next((DOMAIN_OF[t] for t in DOMAIN_PRIORITY if t in tags), None)
         # Nova used to be diverted into a flat list here, which was right when
         # it held six notes and wrong now it holds 134 — most of them source
         # code, which belongs in its own topic rather than beside the prose that
@@ -644,7 +689,8 @@ def main():
                     + f"# {title}\n\n{desc_for(domain, topic)}\n\n"
                     + f"{len(notes)} notes.\n\n" + "\n".join(lines)
                     + f"\n\nPart of [[moc-{domain}|{dom_title}]].\n")
-            (VAULT / f"moc-{topic}.md").write_text(body, encoding="utf-8")
+            vaultpaths.find_note(VAULT, f"moc-{topic}.md", here).write_text(
+                body, encoding="utf-8")
             made += 1
 
         lines = [f"- [[moc-{t}|{topic_title(domain, t)}]] — {len(topics[t])} notes"
@@ -654,7 +700,8 @@ def main():
                 + f"# {dom_title}\n\n{dom_desc}\n\n{total} notes across "
                 + f"{len(order)} topics.\n\n" + "\n".join(lines)
                 + "\n\nBack to [[index|Index]].\n")
-        (VAULT / f"moc-{domain}.md").write_text(body, encoding="utf-8")
+        vaultpaths.find_note(VAULT, f"moc-{domain}.md", here).write_text(
+            body, encoding="utf-8")
         made += 1
 
     idx = (frontmatter("Index", ["orb", "moc"])
@@ -662,7 +709,10 @@ def main():
              "here in three hops: domain, topic, note.\n\n"
            + "\n".join(f"- [[moc-{d}|{t}]] — {dd}" for d, t, dd in DOMAINS)
            + "\n")
-    (VAULT / "index.md").write_text(idx, encoding="utf-8")
+    # index.md is on build_folders' keep-at-root list, so this resolves to the
+    # root either way - through find_note so it stays correct if that changes.
+    vaultpaths.find_note(VAULT, "index.md", here).write_text(idx,
+                                                             encoding="utf-8")
 
     print(f"  hub notes written: {made} (+ index)")
     for domain, dom_title, _ in DOMAINS:

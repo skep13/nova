@@ -33,7 +33,32 @@ _STOP = set("""a an the is are was were be been being am of in on at to for with
 than that this these those it its as by from what who whom when where why how do does did done can
 could should would will shall may might must i you he she they we us me my your our their his her
 about tell explain say know think give show please just really very some any there here so no yes
-not have has had get got make made take put see look want need use using""".split())
+not have has had get got make made take put see look want need use using
+much many often also even still such both each every another again once else
+because while whether either neither quite rather actually basically simply
+ever always never sometimes too own same thing things""".split())
+# The last four lines were added after "how much water for rice" returned the
+# Wikipedia article on rice instead of the cooking cheatsheet that answers it.
+#
+# The cause was not the ranking weights. "much" was being kept as a query term
+# with a rarity of 2.09 — it appears in only 189 of 1,340 notes, so the index
+# considered it informative — and rice.md happens to contain the word in its
+# prose while the cheatsheet does not. That gave the article a coverage of 1.00
+# against the cheatsheet's 0.75, and coverage multiplies the whole score, so a
+# function word carrying no topic decided the answer: 17.36 against 13.87.
+#
+# Rarity cannot see this. It measures how often a word occurs, and "much" is
+# genuinely uncommon in encyclopedia prose — it is uninformative for a reason
+# no document frequency can express. The list is the only place to say so.
+#
+# Only the words with no topical sense in this vault. "long", "hot", "far" and
+# "big" are deliberately NOT here despite appearing in the same "how much /
+# how long" question frames, because long grain, hot water and far infrared
+# are things somebody asks about. Comparatives are out for the same reason:
+# least squares, most significant bit.
+#
+# This list filters QUERIES only — key_terms, not the document indexer — so
+# nothing in the vault becomes unfindable, and no note is re-embedded.
 
 
 # Praise for the question, removed from the front for the same reason the empty

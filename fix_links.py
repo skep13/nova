@@ -17,6 +17,8 @@ import pathlib
 import re
 import sys
 
+import vaultpaths
+
 VAULT = pathlib.Path("/opt/orb/mem")
 
 # Three links were generated with a nested opening bracket —
@@ -36,7 +38,13 @@ def slug(s):
 
 
 def main():
-    stems = {p.stem for p in VAULT.glob("*.md")}
+    # Walked once and reused. Obsidian resolves a wikilink by basename
+    # regardless of folder, so the link targets are exactly the same set they
+    # were before the vault was sorted - but a top-level glob now finds four
+    # files, which would report every link in the vault as broken and then
+    # "fix" them into something worse.
+    all_notes = sorted(vaultpaths.notes(VAULT))
+    stems = {p.stem for p in all_notes}
     by_lower = {s.lower(): s for s in stems}
 
     # Some notes are filed under a prefix that the prose never uses: the note
@@ -44,7 +52,7 @@ def main():
     # orb-overview.md. Slugging the link text can never reach those, so the
     # frontmatter title is the authority and is checked before giving up.
     by_title = {}
-    for p in VAULT.glob("*.md"):
+    for p in all_notes:
         head = p.read_text(encoding="utf-8", errors="replace")[:400]
         m = re.search(r"^title:\s*(.+)$", head, re.M)
         if m:
@@ -53,7 +61,7 @@ def main():
     fixed = touched = already = unresolved = 0
     misses = {}
 
-    for path in sorted(VAULT.glob("*.md")):
+    for path in all_notes:
         raw = original = path.read_text(encoding="utf-8", errors="replace")
 
         # Collapse the nested-bracket damage before anything tries to parse it.

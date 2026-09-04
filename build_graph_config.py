@@ -25,32 +25,40 @@ def rgb(h):
     return {"a": 1, "rgb": int(h, 16)}
 
 
-# Order is deliberate: Obsidian gives a node the colour of the FIRST group it
-# matches, and most notes carry several tags.
+# By PATH, now that the vault has folders.
 #
-# #moc leads so the hub skeleton stays visible as a structure rather than
-# dissolving into the cluster it organises. #source is second because a source
-# note also carries a domain tag and would otherwise be indistinguishable from
-# the subject it implements.
+# The tag version had a real ambiguity: Obsidian gives a node the colour of the
+# first group it matches, and most notes carry several tags, so the order of
+# this list silently decided the colour of anything tagged twice. A note lives
+# in exactly one folder, so paths remove that entirely - the legend and the
+# file explorer now say the same thing.
 #
-# #reference is deliberately absent: it is on 1,055 of 1,502 notes, so as a
-# colour group it marks almost everything and distinguishes nothing. Same
-# reasoning as when the vault was a quarter the size.
+# hubs is white so the skeleton stays visible as a structure rather than
+# dissolving into the clusters it organises, and field is amber because it is
+# the one group a person should be able to find at a glance.
+#
+# There is no group for the #reference tag: it is on 1,055 of 1,502 notes, so
+# it would mark almost everything and distinguish nothing - the same reasoning
+# the previous version applied when the vault was a quarter the size.
 #
 # Nine groups, because a legend longer than that is not read. Counts measured
-# 2026-09-04.
+# 2026-09-04, and they are the folder sizes build_folders.py reports.
+#
+# hubs grew from 140 to 149 when build_mocs.py learned the tag vocabulary the
+# newer note builders use — #cooking, #consumer, #medical and the rest matched
+# no domain at all, so 78 notes were written into no hub and hung unreachable
+# in this graph. Nine new topic hubs, and one orphan left: a note recording a
+# preference, which is not something a map of content should point at.
 GROUPS = [
-    ("tag:#moc",                                    "FFFFFF"),  # 141 hubs
-    ("tag:#source OR tag:#code",                    "8899A6"),  # 221 the machine itself
-    ("tag:#security",                               "E05252"),  # 133
-    ("tag:#ai",                                     "4D9DE0"),  # 101
-    ("tag:#cs OR tag:#web OR tag:#ops",             "5FBF77"),  # 167 computing
-    # Safety-critical, and the one group that should be findable at a glance.
-    ("tag:#field OR tag:#emergency OR tag:#medical", "E8913A"),  # 51+
-    ("tag:#health OR tag:#wellbeing OR tag:#mind",   "D96BA0"),  # 132 the body and the head
-    ("tag:#home OR tag:#household OR tag:#kitchen OR tag:#cooking OR tag:#garden OR tag:#diy",
-                                                     "C4A24D"),  # 167 domestic
-    ("tag:#nova",                                    "B07FE0"),  # 250 this project
+    ("path:hubs",        "FFFFFF"),  #  149  the skeleton: index, domains, topics
+    ("path:field",       "E8913A"),  #   52  safety-critical, findable at a glance
+    ("path:health",      "D96BA0"),  #  142  the body and the head
+    ("path:home",        "C4A24D"),  #  163  house, kitchen, garden, tools, vehicle
+    ("path:money-admin", "6FC2B0"),  #   11  consumer rights, work, housing
+    ("path:computing",   "4D9DE0"),  #  359  ai, security, cs, web, ops
+    ("path:code",        "8899A6"),  #  290  the machine itself
+    ("path:world",       "5FBF77"),  #  289  science, nature, culture, skills
+    ("path:reference",   "9E8FB2"),  #   52  cheatsheets that fit nowhere else
 ]
 
 graph = {

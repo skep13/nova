@@ -27,7 +27,13 @@ import sys
 
 DEFAULT = ["remote_proxy.py", "nova_bridge.py", "timeparse.py", "arith.py",
            "filters.py",
-           "persona.py", "eval_models.py", "extract_persona.py"]
+           "persona.py", "eval_models.py", "extract_persona.py",
+           # The vault scripts. Added when three of them started importing
+           # vaultpaths: a name that module does not export would not fail
+           # until the script was run by hand against the real vault, which is
+           # the worst possible moment to find out.
+           "vaultpaths.py", "build_mocs.py", "build_vault.py", "fix_links.py",
+           "build_folders.py", "build_graph_config.py"]
 
 
 def module_names(tree):

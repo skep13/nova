@@ -30,6 +30,14 @@ import urllib.parse
 BASE = "http://127.0.0.1:8080"
 QUICK = "--quick" in sys.argv
 
+# The directory this file is in, for the tests that read source rather than
+# call it. They used bare relative paths, so the suite passed from /opt/orb and
+# failed from anywhere else with FileNotFoundError - which is reported as a
+# failing test, not as a broken invocation, so it reads as a regression in the
+# thing being tested. A test whose result depends on the working directory is
+# not testing what it claims to.
+SRC = pathlib.Path(__file__).resolve().parent
+
 # Whatever docker-compose.yml loads into llama. One place, so a model swap is a
 # one-line change here rather than a hunt through assertions.
 EXPECT_LOCAL_MODEL = "Qwen3-4B"
@@ -1217,6 +1225,18 @@ def t_ingest_rejects_empty():
     return code_of("/ingest", "POST", timeout=30) == "400", "an empty upload is refused"
 
 
+def _vault_notes(V):
+    """Every note the loader would see, wherever it now lives.
+
+    The vault is in folders, so a top-level glob finds the four files kept at
+    root and nothing else. inbox/ is excluded for the same reason
+    remote_proxy excludes it: nothing in there has been read by a person yet.
+    """
+    skip = {"inbox", ".obsidian", ".trash", ".git"}
+    return [p for p in V.rglob("*.md")
+            if not set(p.relative_to(V).parts[:-1]) & skip]
+
+
 def t_vault_links():
     import pathlib, re
     V = pathlib.Path("/opt/orb/mem")
@@ -1225,9 +1245,10 @@ def t_vault_links():
     # markdown reference note as broken for documenting the syntax correctly —
     # the note was right and the check was wrong.
     fence = re.compile(r"```.*?```|`[^`\n]*`", re.S)
-    stems = {p.stem for p in V.glob("*.md")}
+    notes = _vault_notes(V)
+    stems = {p.stem for p in notes}
     bad = 0
-    for p in V.glob("*.md"):
+    for p in notes:
         prose = fence.sub("", p.read_text(encoding="utf-8", errors="replace"))
         for t in set(re.findall(r"\[\[([^\]|#]+)", prose)):
             if t.strip() not in stems:
@@ -1238,11 +1259,11 @@ def t_vault_links():
 def t_vault_hubs():
     import pathlib, re
     V = pathlib.Path("/opt/orb/mem")
-    hubs = list(V.glob("moc-*.md"))
+    hubs = [p for p in _vault_notes(V) if p.name.startswith("moc-")]
     linked = set()
     for h in hubs:
         linked |= {m for m in re.findall(r"\[\[([^\]|#]+)", h.read_text(encoding="utf-8", errors="replace"))}
-    notes = {p.stem for p in V.glob("*.md")
+    notes = {p.stem for p in _vault_notes(V)
              if not p.stem.startswith(("moc-", "src-")) and p.stem != "index"}
     orphans = notes - linked
     return len(orphans) < 40, f"{len(hubs)} hubs, {len(orphans)} notes not in any hub"
@@ -1262,8 +1283,8 @@ def t_routes_reachable():
     much more than the wiring this is about.
     """
     routes = set(re.findall(r'web\.(?:post|get)\("([^"]+)"',
-                            pathlib.Path("remote_proxy.py").read_text(encoding="utf-8")))
-    conf = pathlib.Path("nginx.conf").read_text(encoding="utf-8")
+                            (SRC / "remote_proxy.py").read_text(encoding="utf-8")))
+    conf = (SRC / "nginx.conf").read_text(encoding="utf-8")
     exact = set(re.findall(r"location\s*=\s*(\S+)\s*\{", conf))
     prefixes = set(re.findall(r"location\s+(/\S*/)\s*\{", conf))
 

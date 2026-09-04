@@ -15,6 +15,8 @@ Hand-written notes are never touched. They still take part in the graph.
 """
 import datetime, html, json, pathlib, re, sys, urllib.parse, urllib.request
 
+import vaultpaths
+
 MEM = pathlib.Path("/opt/orb/mem")
 NOW = datetime.datetime.now().isoformat(timespec="seconds")
 BASE = "http://localhost:8080/wiki"
@@ -348,6 +350,10 @@ def short(title):
 
 def main():
     MEM.mkdir(parents=True, exist_ok=True)
+    # The vault is in folders. Resolving by basename is what keeps the
+    # already-on-disk check below honest: miss it and this refetches a note
+    # that exists, then writes a second copy of it at the root.
+    on_disk = vaultpaths.index(MEM)
     written, missing = {}, []
     total = sum(len(v) for v in TOPICS.values())
     n = 0
@@ -361,7 +367,7 @@ def main():
             # file, changing its mtime for text that has not changed, which
             # forces a full re-embed and shows the whole vault to Obsidian
             # as modified.
-            if (MEM / (slugify(name) + ".md")).exists():
+            if slugify(name) + ".md" in on_disk:
                 continue
             href = find_article(t)
             body = lede(href) if href else ""
@@ -378,7 +384,7 @@ def main():
     # operating-system.md is what left 1308 links in this vault pointing at
     # nothing. [[slug|Display]] shows the same words and actually resolves.
     stem_of = {n: meta[0][:-3] for n, meta in written.items()}
-    for p in MEM.glob("*.md"):                 # notes already on disk
+    for p in on_disk.values():                 # notes already on disk
         # Maps of content are NOT link targets. Their titles are concept
         # names that collide with the real notes, and prose linking to an
         # index instead of an explanation is a category error.
@@ -406,7 +412,11 @@ def main():
                f"tags: [{tag}, reference]\n" f"source: wikipedia_en_full/{source}\n"
                "---\n\n" f"# {name}\n\n{linked}\n"
                + (f"\nSee also: {see}\n" if see else ""))
-        (MEM / fname).write_text(doc, encoding="utf-8")
+        # New notes land at the root and build_folders.py files them on its
+        # next run; find_note is here so a name that somehow survived the
+        # check above updates the existing note instead of shadowing it.
+        vaultpaths.find_note(MEM, fname, on_disk).write_text(doc,
+                                                             encoding="utf-8")
 
     by_tag = {}
     for name, (_, tag, _, _) in written.items():

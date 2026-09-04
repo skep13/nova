@@ -871,11 +871,42 @@ def load_vault(force=False):
             # for the whole corpus.
             r"^tags:.*\bref(?:erence)?\b",
                                               fm.group(1), re.M))
-            notes.append({"file": p.name, "title": title or p.stem, "body": body,
+            notes.append({"file": p.name,
+                          # Relative to the vault root, for reading the file.
+                          # "file" cannot do this once notes live in folders,
+                          # and it has to stay a basename for the embedding
+                          # cache and the src- check.
+                          "path": str(p.relative_to(VAULT_DIR)).replace("\\", "/"),
+                          "title": title or p.stem, "body": body,
                           "generated": generated, "reference": reference})
     except Exception:
         pass
     _vault, _vault_stamp = notes, stamp
+
+
+def vault_path_for(name):
+    """Where a note with this basename already lives, or the root if it is new.
+
+    The vault is in folders now, and both writers below used to build their
+    path as VAULT_DIR / name. That is not where an existing note is, so
+    instead of updating it they wrote a SECOND file with the same basename -
+    which is exactly what happened on 4 Sep: /research on a question that had
+    been researched before produced mem/research-uv-test.md alongside
+    mem/computing/research-uv-test.md. The embedding cache is keyed on the
+    basename, so the two then shared one vector, and build_folders.py refuses
+    to run at all while a collision exists.
+
+    Resolved against the loaded index rather than the disk: it is already in
+    memory, it is the same set of notes retrieval can see, and it costs a scan
+    of a list instead of a walk of 1,500 files. If the vault has not loaded
+    yet this returns the root, which is what the old code did unconditionally.
+    """
+    if not name.endswith(".md"):
+        name += ".md"
+    for n in _vault:
+        if n["file"] == name:
+            return VAULT_DIR / n.get("path", name)
+    return VAULT_DIR / name
 
 
 # The answer filters, and the retrieval stopwords they share.
@@ -1384,7 +1415,7 @@ async def build_embeddings():
     try:
         async with aiohttp.ClientSession(timeout=timeout) as s:
             for n in _vault:
-                path = VAULT_DIR / n["file"]
+                path = VAULT_DIR / n.get("path", n["file"])
                 try:
                     mtime = path.stat().st_mtime
                 except OSError:
@@ -2003,7 +2034,7 @@ def research_note(question, title, answer, vault_hit, articles, agent_name,
     if vault_hit:
         for n in _vault:
             if n["file"] == vault_hit["file"]:
-                head = (VAULT_DIR / n["file"]).read_text(encoding="utf-8",
+                head = (VAULT_DIR / n.get("path", n["file"])).read_text(encoding="utf-8",
                                                          errors="replace")[:400]
                 g = re.search(r"^tags:\s*\[(.*)\]", head, re.M)
                 if g:
@@ -2024,7 +2055,11 @@ def research_note(question, title, answer, vault_hit, articles, agent_name,
     # question, and it should not join the vault without being read.
     into = folder or VAULT_DIR
     into.mkdir(parents=True, exist_ok=True)
-    path = into / (stem + ".md")
+    # An escalation note goes to the inbox and nowhere else. A /research note
+    # goes wherever that note already is, which after the folder sort is
+    # usually not the root — resolving by name is what makes the re-research
+    # case below overwrite rather than duplicate.
+    path = (into / (stem + ".md")) if folder else vault_path_for(stem + ".md")
     # Never clobber something a person wrote or uploaded. Re-researching the
     # same question overwrites the previous research note deliberately —
     # otherwise asking twice quietly doubles the vault.
@@ -2032,7 +2067,8 @@ def research_note(question, title, answer, vault_hit, articles, agent_name,
         head = path.read_text(encoding="utf-8", errors="replace")[:400]
         existing = re.search(r"^tags:\s*\[(.*)\]", head, re.M)
         if not existing or "research" not in existing.group(1):
-            path = into / f"{stem}-{now.strftime('%H%M%S')}.md"
+            # Beside the note being stepped around, not back at the root.
+            path = path.parent / f"{stem}-{now.strftime('%H%M%S')}.md"
 
     doc = ("---\n"
            f"created: {now.isoformat(timespec='seconds')}\n"
@@ -3282,10 +3318,15 @@ def note_path(title):
     stem = slug(title, 60)
     if not stem or stem == "exchange":
         return None
-    path = (VAULT_DIR / f"{stem}.md").resolve()
+    # Resolved by basename: appending to a note has to update the one that is
+    # in the vault, not shadow it with a second copy at the root.
+    path = vault_path_for(stem + ".md").resolve()
     # Belt and braces. slug() should make traversal impossible, so if this ever
     # fires then that assumption has broken and refusing is the only safe move.
-    if path.parent != VAULT_DIR.resolve():
+    # Anywhere UNDER the vault is now legitimate, where it once had to be the
+    # root itself — but outside it still is not.
+    root = VAULT_DIR.resolve()
+    if path.parent != root and root not in path.parents:
         return None
     return path
 
