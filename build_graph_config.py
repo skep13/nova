@@ -7,11 +7,17 @@ same view appears on every device that syncs the vault's config directory.
 
 Colours are stored by Obsidian as a single integer, not a hex string, so they
 are converted rather than written literally.
+
+REWRITTEN for the vault as it is now. The previous version was tuned for 338
+notes and the vault holds 1,502; the counts in its comments were four times out
+of date and two of its groups (#orb at 6 notes) were invisible at that scale.
+Every count below was measured, not remembered.
 """
 import json
 import pathlib
+import sys
 
-VAULT = pathlib.Path("/opt/orb/mem")
+VAULT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/opt/orb/mem")
 CFG = VAULT / ".obsidian"
 
 
@@ -19,28 +25,40 @@ def rgb(h):
     return {"a": 1, "rgb": int(h, 16)}
 
 
-# Order is deliberate. Hub notes carry BOTH #moc and their domain tag, so
-# whichever group Obsidian resolves first decides their colour — #moc leads so
-# the 28-note skeleton stays visible as a structure rather than dissolving into
-# the cluster it organises.
+# Order is deliberate: Obsidian gives a node the colour of the FIRST group it
+# matches, and most notes carry several tags.
 #
-# #reference is deliberately absent: it is on 298 of 338 notes, so as a colour
-# group it marks almost everything and distinguishes nothing.
+# #moc leads so the hub skeleton stays visible as a structure rather than
+# dissolving into the cluster it organises. #source is second because a source
+# note also carries a domain tag and would otherwise be indistinguishable from
+# the subject it implements.
+#
+# #reference is deliberately absent: it is on 1,055 of 1,502 notes, so as a
+# colour group it marks almost everything and distinguishes nothing. Same
+# reasoning as when the vault was a quarter the size.
+#
+# Nine groups, because a legend longer than that is not read. Counts measured
+# 2026-09-04.
 GROUPS = [
-    ("tag:#moc",      "FFFFFF"),   # the 28 hubs — index, domains, topics
-    ("tag:#security", "E05252"),   # 115
-    ("tag:#ai",       "4D9DE0"),   # 91
-    ("tag:#cs",       "5FBF77"),   # 66
-    ("tag:#field",    "E0A44D"),   # 28
-    ("tag:#orb",      "B07FE0"),   # 6
+    ("tag:#moc",                                    "FFFFFF"),  # 141 hubs
+    ("tag:#source OR tag:#code",                    "8899A6"),  # 221 the machine itself
+    ("tag:#security",                               "E05252"),  # 133
+    ("tag:#ai",                                     "4D9DE0"),  # 101
+    ("tag:#cs OR tag:#web OR tag:#ops",             "5FBF77"),  # 167 computing
+    # Safety-critical, and the one group that should be findable at a glance.
+    ("tag:#field OR tag:#emergency OR tag:#medical", "E8913A"),  # 51+
+    ("tag:#health OR tag:#wellbeing OR tag:#mind",   "D96BA0"),  # 132 the body and the head
+    ("tag:#home OR tag:#household OR tag:#kitchen OR tag:#cooking OR tag:#garden OR tag:#diy",
+                                                     "C4A24D"),  # 167 domestic
+    ("tag:#nova",                                    "B07FE0"),  # 250 this project
 ]
 
 graph = {
     "collapse-filter": False,
     "search": "",
-    "showTags": False,          # tag nodes would add 14 hubs nobody navigates by
+    "showTags": False,          # tag nodes would add hubs nobody navigates by
     "showAttachments": False,
-    "hideUnresolved": True,     # nothing to hide now, but keeps it that way
+    "hideUnresolved": True,
     "showOrphans": True,
 
     "collapse-color-groups": False,
@@ -48,44 +66,44 @@ graph = {
 
     "collapse-display": False,
     "showArrow": False,
-    # Labels only resolve as you zoom, otherwise 338 captions overlap into noise.
-    "textFadeMultiplier": -1.4,
-    "nodeSizeMultiplier": 1.15,
-    "lineSizeMultiplier": 0.7,
+    # Labels only resolve as you zoom; 1,502 captions overlap into noise.
+    # Pushed further negative than the 338-note version needed.
+    "textFadeMultiplier": -2.2,
+    # Smaller nodes at four times the count, or the graph is solid ink.
+    "nodeSizeMultiplier": 0.8,
+    "lineSizeMultiplier": 0.5,
 
-    # Near the extremes, not merely off the defaults. At 338 nodes and ~2250
-    # links the defaults collapse the graph into a single ball regardless of
-    # how well structured the links are — the hub layer is present in the data
-    # and simply cannot be seen. A first pass at 0.28/16/0.55/220 was still a
-    # ball on the device; centre strength is the term doing the damage, so it
-    # goes to the floor and repulsion to the ceiling.
+    # Near the extremes, not merely off the defaults. The defaults collapse a
+    # graph this size into a single ball regardless of how well structured the
+    # links are — the hub layer is present in the data and simply cannot be
+    # seen. Centre strength is the term doing the damage, so it sits at the
+    # floor and repulsion at the ceiling.
+    #
+    # Raised again from the 338-note settings: four times the nodes need
+    # proportionally more room or the clusters merge back into one mass.
     "collapse-forces": False,
-    "centerStrength": 0.1,
-    "repelStrength": 20,
-    "linkStrength": 0.3,
-    "linkDistance": 400,
+    "centerStrength": 0.05,
+    "repelStrength": 25,
+    "linkStrength": 0.25,
+    "linkDistance": 550,
 
-    "scale": 0.62,
+    "scale": 0.35,
     "close": False,
 }
 
 # Depth 2 is the readable unit on a phone: a note, its neighbours, and the hub
-# it hangs from — roughly 20 nodes instead of 338.
+# it hangs from — roughly 20 nodes instead of 1,502.
 local_graph = dict(graph)
 local_graph.update({"localJumps": 2, "localBacklinks": True,
                     "localForelinks": True, "localInterlinks": False,
-                    "scale": 1.0})
+                    "scale": 1.0, "nodeSizeMultiplier": 1.1,
+                    "textFadeMultiplier": 0.0})
 
 CFG.mkdir(parents=True, exist_ok=True)
 (CFG / "graph.json").write_text(json.dumps(graph, indent=2), encoding="utf-8")
+(CFG / "local-graph.json").write_text(json.dumps(local_graph, indent=2),
+                                      encoding="utf-8")
 
-appearance = CFG / "app.json"
-if not appearance.exists():
-    appearance.write_text(json.dumps({"attachmentFolderPath": "attachments"},
-                                     indent=2), encoding="utf-8")
-
-print(f"  wrote {CFG / 'graph.json'}")
-print(f"  colour groups: {len(GROUPS)}")
+print(f"  {len(GROUPS)} colour groups written to {CFG}")
 for q, c in GROUPS:
-    print(f"    {q:16} #{c}")
-print(f"  local graph depth: {local_graph['localJumps']}")
+    print(f"    #{c}  {q}")

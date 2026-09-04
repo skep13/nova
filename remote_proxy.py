@@ -864,7 +864,12 @@ def load_vault(force=False):
             # The hand-written cheatsheets. Flagged here rather than inferred
             # from the filename so a note keeps its status if it is ever moved
             # or renamed.
-            reference = bool(fm and re.search(r"^tags:.*\bref\b",
+            reference = bool(fm and re.search(# "ref" OR "reference". \bref\b does not match "reference" - the word
+            # boundary fails on the "e" - so this flag matched none of the
+            # 1,055 cheatsheets it was written for, all of which carry the
+            # full word. The operational nudge that depends on it was inert
+            # for the whole corpus.
+            r"^tags:.*\bref(?:erence)?\b",
                                               fm.group(1), re.M))
             notes.append({"file": p.name, "title": title or p.stem, "body": body,
                           "generated": generated, "reference": reference})
