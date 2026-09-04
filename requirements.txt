@@ -1,0 +1,9 @@
+# The router and the bridge. Both containers install this and nothing else —
+# retrieval, the filters, the time grammar and the arithmetic are all standard
+# library, deliberately, because every dependency is a thing that can break on
+# a box nobody is watching.
+aiohttp>=3.9
+
+# NOT required to run the tests that matter. test_filters.py, check_names.py,
+# check_patterns.py, arith.py and timeparse.py are pure standard library and
+# run anywhere with python3 and no install at all.

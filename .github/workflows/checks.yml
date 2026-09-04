@@ -1,0 +1,71 @@
+# The checks that need nothing.
+#
+# The real suites cannot run here and are not meant to: test_nova.py needs the
+# whole stack up on the ThinkPad, and test_personality.py needs twenty minutes
+# of a two-core CPU and a language model. What CAN run anywhere is everything
+# that is pure text logic — which happens to include the filters that stop Nova
+# inventing things, the arithmetic gate, and the time grammar behind reminders.
+#
+# No pip install step, deliberately. If one is ever needed here, something that
+# should have stayed standard library has stopped being standard library.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Everything parses
+        run: |
+          python -c "
+          import ast, pathlib, sys
+          bad = 0
+          for p in sorted(pathlib.Path('.').glob('*.py')):
+              try:
+                  ast.parse(p.read_text(encoding='utf-8'))
+              except SyntaxError as e:
+                  print(f'  {p}: {e}'); bad += 1
+          print(f'  {len(list(pathlib.Path(chr(46)).glob(chr(42)+chr(46)+chr(112)+chr(121))))} files parsed')
+          sys.exit(bad)
+          "
+
+      # A call to a function that does not exist in the module calling it.
+      # This is here because log() reached remote_proxy.py from nova_bridge.py
+      # and sat in an except block until an escalation failed, at which point
+      # the error handler raised NameError and turned a degraded answer into a
+      # 500. Silent at import, silent in the happy path.
+      - name: No undefined calls
+        run: python check_names.py
+
+      # A regex that compiles is not a regex that works. Every apostrophe
+      # pattern in the personality suite once compiled to something that could
+      # never match, and reported nothing wrong.
+      - name: The test suite's own patterns can fire
+        run: python check_patterns.py
+
+      - name: Answer filters
+        run: python test_filters.py
+
+      - name: The persona in index.html matches the extracted copy
+        run: |
+          python extract_persona.py
+          git diff --exit-code persona.py \
+            || (echo "persona.py is out of date: run extract_persona.py"; exit 1)
+
+      - name: Nothing personal has crept back in
+        run: |
+          if git grep -inI -e "NP7" -e "jacob" -- . ; then
+            echo "an identifier is back in the source"; exit 1
+          fi
+          echo "  clean"
