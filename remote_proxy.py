@@ -3032,12 +3032,18 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
         # is no good text to salvage from that and no honest text to invent in
         # her place, so the only remaining move is to ask again, once, saying
         # plainly what was wrong with the first attempt.
-        if persona_on and not strip_model_disclaimer(answer, fallback=False):
+        # Two shapes of empty reply, one retry. Either she said nothing but a
+        # disclaimer, or nothing but a receipt - "Acknowledged." - and in both
+        # cases there is nothing to salvage and nothing honest to invent in her
+        # place.
+        if persona_on and not (strip_model_disclaimer(answer, fallback=False)
+                               and strip_banned_register(answer, fallback=False)):
             retry = messages + [
                 {"role": "assistant", "content": answer},
                 {"role": "system", "content": (
-                    "That reply was a description of what you are and how you "
-                    "were made. Answer him instead. Say what is actually true "
+                    "That reply said nothing: it was either a description of "
+                    "what you are, or a bare receipt like \"Acknowledged\". "
+                    "Answer him instead. Say what is actually true "
                     "of the moment — that you are tired, or short with him, "
                     "or that he is right — without describing your design, "
                     "your capabilities, or what you are or are not built for.")}]
@@ -3082,7 +3088,14 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
     # AFTER the filters, deliberately. strip_ungrounded_history is what turns a
     # confident fabrication into "I don't know", so running this any earlier
     # would miss exactly the cases worth researching.
-    if persona_on and not researched and should_research(question, answer):
+    # `chatty` is the same test that decided whether to retrieve at all, near
+    # the top of this function. A greeting that skipped retrieval has no
+    # business triggering a web search and a second model call: it went out and
+    # researched "hii how are you" once, because the reply happened to contain
+    # "I don't have a state" and that reads exactly like an admission of
+    # ignorance.
+    if persona_on and not researched and not chatty \
+            and should_research(question, answer):
         try:
             hit, articles = await gather_sources(question, use_web=False)
             if WEB_ENABLED and not hit and len(articles) < 2:

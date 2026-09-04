@@ -519,13 +519,32 @@ _STOCK = re.compile(
     r"as an ai(?: language model)?|i am an ai assistant)\b", re.I)
 
 # British filler he asked to have removed.
+# The register of a form, not a person.
+#
+# The persona says in plain words: no "acknowledged", no "understood",
+# no "no further action needed". Asked how she was, the reply was
+# "Acknowledged." One instruction among twenty-odd, and it lost.
+#
+# Anchored to a whole sentence on purpose: "Acknowledged the drive is SATA"
+# is a real answer and survives. The failure is the bare receipt.
+_OFFICIALESE = re.compile(
+    r"^\W*(?:acknowledged|understood|noted|affirmative|confirmed|received|"
+    r"roger|copy that|no further action(?: needed| required)?|"
+    r"request (?:received|noted)|standing by)\W*$", re.I)
+
 _IDIOM = re.compile(
     r"^\W*(?:cheers|no bother|no worries|brilliant|lovely|blimey|"
     r"right then|ta)\W*$", re.I)
 
 
-def strip_banned_register(text):
-    """Remove emoji, comfort cliches, stock-assistant filler and idiom."""
+def strip_banned_register(text, fallback=True):
+    """Remove emoji, comfort cliches, stock-assistant filler and idiom.
+
+    With fallback=False a reply that was NOTHING BUT banned register comes back
+    empty, so the caller can ask again. "Acknowledged." as an entire message is
+    the failure itself; returning it because there is nothing else left hands
+    over exactly what the filter exists to stop.
+    """
     cleaned = _PICTOGRAPH.sub("", text or "")
 
     kept = []
@@ -534,15 +553,20 @@ def strip_banned_register(text):
             continue
         if _COMFORT.search(sentence) or _STOCK.search(sentence):
             continue
-        if _IDIOM.match(sentence.strip()):
+        stripped = sentence.strip()
+        if _IDIOM.match(stripped) or _OFFICIALESE.match(stripped):
             continue
         kept.append(sentence)
 
     out = re.sub(r"\s{2,}", " ", " ".join(kept)).strip()
-    # Never nothing: a reply that was ONLY filler still has to say something,
-    # and the original is a better fallback than silence. The persona still
-    # carries these rules too, so this is the second line, not the only one.
-    return out or re.sub(r"\s{2,}", " ", cleaned).strip() or (text or "").strip()
+    if out:
+        return out
+    if not fallback:
+        return ""
+    # Otherwise: a reply that was only filler still has to say something, and
+    # the original beats silence. The persona carries these rules too, so this
+    # is the second line rather than the only one.
+    return re.sub(r"\s{2,}", " ", cleaned).strip() or (text or "").strip()
 
 
 def strip_opening_praise(text):
