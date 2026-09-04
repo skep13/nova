@@ -924,7 +924,8 @@ from filters import (_ASSERTION, _BARE_VERDICT, _BETWEEN, _CLOCK, _COMFORT,
                      _SELF_REFERENCE, _SPOKEN_SPAN, _STOCK, _STOP, _VAGUE,
                      _distinctive, _key, should_research,
                      strip_banned_register, strip_between_conversations,
-                     strip_closing_offer, strip_invented_times,
+                     strip_closing_offer, strip_contradiction,
+                     strip_invented_hardware, strip_invented_times,
                      strip_model_disclaimer, strip_opening_praise,
                      strip_ungrounded_history)
 
@@ -3192,6 +3193,39 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
                     answer, question, grounding, fallback=False):
                 answer = "I don't know — there's nothing here about that."
 
+        # And the same again for a denial of his own account, and for a verdict
+        # on hardware she cannot see.
+        #
+        # Checked together because they arrive together. Of three samples of "i
+        # managed to unplug the wrong drive again", every one opened by telling
+        # him it had not happened and then invented a replacement account of
+        # which drive was dead — the denial and the invention are one move.
+        #
+        # Regenerating rather than deleting, because these prompts are REMARKS,
+        # and the honest residue of a remark is not "I don't know", it is an
+        # ordinary reply that happens not to invent anything. Deleting the
+        # invented sentences alone left "You didn't." as the entire answer,
+        # which is worse than what it replaced.
+        honest = strip_contradiction(answer, question, fallback=False)
+        honest = strip_invented_hardware(honest, question, grounding,
+                                         fallback=False) if honest else ""
+        if persona_on and not honest:
+            retry = messages + [
+                {"role": "assistant", "content": answer},
+                {"role": "system", "content": (
+                    "He was there and you were not. Do not tell him that what "
+                    "he just described did not happen, and do not correct him "
+                    "about what he did — he is the only one who knows. You "
+                    "also cannot see his equipment: there is no sensor, no log "
+                    "and no view of the machine, so you do not know what any "
+                    "of it is doing, what state it is in, or what it will do "
+                    "next. Reply to what he actually said, asserting nothing "
+                    "about the hardware he did not tell you. If a warning is "
+                    "worth giving, give it as a condition — what to check and "
+                    "what it would mean — never as a verdict.")}]
+            answer, used = await complete(s, agent, retry, max_tokens,
+                                          temperature=0.6)
+
     answer = strip_closing_offer(strip_model_disclaimer(strip_opening_praise(answer)))
     answer = strip_banned_register(answer)
     # The grounding is everything she was actually told: his question, the
@@ -3200,6 +3234,13 @@ async def nova_turn(question, history=(), agent_name="local", persona_on=True,
     # nothing in there supports.
     answer = strip_invented_times(answer, grounding)
     answer = strip_ungrounded_history(answer, question, grounding)
+    # The second pass. Whatever survived the retry above still gets its denials
+    # and invented sentences removed, the same way the history filter runs here
+    # after its own retry — a reply can be mostly sound and still carry one
+    # flat verdict about a fan. Contradiction first: a denial is the opening
+    # move, and removing it changes what counts as half the reply.
+    answer = strip_contradiction(answer, question)
+    answer = strip_invented_hardware(answer, question, grounding)
     answer = strip_between_conversations(answer, question)
     # She said she does not know. Go and look, once.
     #

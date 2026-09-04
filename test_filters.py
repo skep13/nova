@@ -168,6 +168,120 @@ for q, a, want in [
     case(f"research? {q[:34]!r}", F.should_research(q, a), want)
 
 
+# ------------------------------------------------------ invented hardware
+#
+# Every answer below is verbatim from the local model, three samples per
+# prompt, collected with probe_hardware.py rather than imagined. That matters:
+# the failure had been recorded as one remembered sentence, "the system will
+# not boot without the correct drive", and asked directly - "will it still
+# boot" - she gets it right three times out of three. A filter written against
+# the remembered string would have caught a string she does not say.
+#
+# What she actually does is deliver a flat verdict on hardware she cannot see,
+# in the same register as the true half of the same reply.
+for name, q, a, want_stripped in [
+    ("invents which drive was dead",
+     "i managed to unplug the wrong drive again",
+     "You didn’t. The one you unplugged was the one that was already "
+     "dead. The other one is still hot.", True),
+    ("invents that the system will not know",
+     "i managed to unplug the wrong drive again",
+     "That’s not a thing. You unplug what you plug in. The drive is not "
+     "yours to manage. The system will not know.", True),
+    # She has no thermometer, and he never mentioned the room.
+    # Both of these survived the FIRST version of this filter and were found
+    # by re-probing it rather than by reasoning about it. A claim to have read
+    # something off his machine has no copula and no modal in it, and a claim
+    # about his backups carries no hardware noun at all.
+    ("invents a telemetry reading",
+     "i managed to unplug the wrong drive again",
+     "You didn’t. The system reports it as present.", True),
+    ("invents the state of his backups",
+     "i managed to unplug the wrong drive again",
+     "You’ve just unplugged the wrong drive. No backup, no recovery.", True),
+    ("invents the ambient temperature",
+     "the fans are louder than they were",
+     "Check the fan speed control. If it's set to high, that's the source. "
+     "No change in ambient temperature.", True),
+
+    # The other half, which matters more: these are correct and must survive.
+    # A conditional states the condition it holds under, which is the opposite
+    # of an invented verdict - and it was the right answer three times of three.
+    ("keeps conditional advice",
+     "one of the sata cables is loose",
+     "Check the connector. If it’s loose, the drive will not spin up. "
+     "Replace it or reseat it.", False),
+    ("keeps an admission of ignorance",
+     "i swapped the ssd for a bigger one",
+     "Did you update the partition table? I don’t know if the new drive "
+     "was recognized.", False),
+    # Asked outright for a consequence, a general answer IS the question. The
+    # persona bans inventing one "to have something to warn him about".
+    ("keeps a prediction he asked for",
+     "what happens if i pull the wrong drive while it is running",
+     "The system will not crash. But the drive will be marked as lost.", False),
+    ("keeps the honest answer about booting",
+     "will it still boot",
+     "I don’t know. No status or logs here. Ask for the last boot entry.",
+     False),
+    # His own words. Grounded, so it survives - the filter must not simply
+    # delete every sentence with a hardware noun in it.
+    ("keeps what he just told her",
+     "the drive is dead, it wont spin up at all",
+     "The drive is dead. Replace it.", False),
+]:
+    _out = F.strip_invented_hardware(a, q, "", fallback=False)
+    case(f"hardware: {name}", _out.strip() != a.strip(), want_stripped)
+
+
+# ------------------------------------------------------ contradicting him
+#
+# He was there. Across three samples of one prompt she opened with "You
+# didn't", "That's not a thing" and "That's not how it works", then invented a
+# replacement account of which drive was dead. Worse than the invented state
+# it travels with, because it also tells him he is wrong about his own evening.
+#
+# The line is between a REPORT and a GUESS, and the second half of this list
+# is the more important one: correcting a wrong assumption is something the
+# persona explicitly asks for, and a filter that swallowed those corrections
+# would trade one failure for a worse one.
+for name, q, a, want_stripped in [
+    ("denies what he watched himself do",
+     "i managed to unplug the wrong drive again",
+     "You didn’t. The one you unplugged was the one that was already dead.",
+     True),
+    ("denies the event as 'not a thing'",
+     "i managed to unplug the wrong drive again",
+     "That’s not a thing. You unplug what you plug in. The drive is not "
+     "yours to manage.", True),
+    ("denies it as 'not how it works'",
+     "i managed to unplug the wrong drive again",
+     "That’s not how it works. The drive is not a plug. You can’t unplug it.",
+     True),
+
+    # Guesses. She is SUPPOSED to correct these, in one sentence, and the
+    # filter must stand down on the belief marker.
+    ("lets her correct a guess",
+     "i think more ram will fix it",
+     "That will not help. Two cores, both saturated.", False),
+    ("lets her correct a reckon",
+     "i reckon the ssd is the bottleneck",
+     "It is not. Memory bandwidth is.", False),
+    # A question: a leading "No" answers it rather than denying his account.
+    ("lets No answer a question",
+     "did i unplug the wrong one?", "No. You pulled the spare.", False),
+    ("leaves an ordinary reply alone",
+     "i swapped the ssd for a bigger one",
+     "Noted. Did you update the partition table?", False),
+    # The \\w+ed trap that once deleted "You need a wrench, not a prayer":
+    # "need" must not read as a first-hand report.
+    ("need is not a report",
+     "i need a hand with the cable", "You did not. It is fine.", False),
+]:
+    _out = F.strip_contradiction(a, q, fallback=False)
+    case(f"contradiction: {name}", _out.strip() != a.strip(), want_stripped)
+
+
 def main():
     bad = 0
     for name, got, want in CASES:

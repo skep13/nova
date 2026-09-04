@@ -480,6 +480,242 @@ def strip_ungrounded_history(answer, question, grounding, fallback=True):
     return (answer or "").strip() if fallback else ""
 
 
+# His equipment, as she refers to it.
+#
+# Bare nouns rather than whole phrases, because the invention arrives attached
+# to whatever determiner fits: "the system", "your array", "the other one".
+# "the one" and "the other one" are in here despite being generic, because
+# this filter only ever runs on a remark he made about his kit, and in that
+# context they are how she refers to a drive without naming it - "The one you
+# unplugged was the one that was already dead" is the whole failure in a
+# sentence.
+_KIT_NOUNS = """
+system machine server laptop box drive drives disk disks ssd hdd cable cables
+connector connectors fan fans psu board bios array pool raid mirror partition
+controller port ports card gpu cpu memory ram battery screen kernel filesystem
+volume bus socket sensor airflow temperature firmware chip link
+backup backups recovery data logs log journal cache uptime
+""".split()
+# The second line was added after a measured miss. "No backup, no recovery."
+# arrived unprompted on the drive prompt, asserting the state of his whole
+# backup arrangement — which she has never seen — and it carried no hardware
+# noun at all, so the sentence was not even a candidate.
+
+_KIT = re.compile(r"\b(?:" + "|".join(_KIT_NOUNS) + r")\b"
+                  r"|\bthe (?:one|other one|others|second one|first one)\b",
+                  re.I)
+
+# The same nouns, stemmed, so a verdict built entirely from hardware words and
+# grammar ("The system will not know") can be recognised as carrying no content
+# of its own.
+_KIT_WORDS = {_key(w) for w in _KIT_NOUNS}
+
+# A claim stated flat, as fact. Modal certainty, a copula, or a verbless
+# verdict - "No change in ambient temperature" has no verb at all for a
+# verb-based test to find, and is an assertion about his room regardless.
+_DEFINITE = re.compile(
+    r"\b(?:will|wo ?n[o’']?t|cannot|ca ?n[o’']?t|must|always|never)\b"
+    r"|\b(?:is|are|was|were|has|have)\b"
+    # Reporting verbs. "The system reports it as present" is a claim to have
+    # READ something off his machine, which is the strongest form of this
+    # failure and the one with no copula or modal in it to catch. It survived
+    # the first version of this filter for exactly that reason.
+    r"|\b(?:reports?|shows?|says?|indicates?|reads?|detects?|confirms?|"
+    r"lists?|registers?)\b"
+    r"|^\W*no\s+\w+", re.I)
+
+# Anything that states the condition under which the claim holds.
+#
+# A conditional is not an invention. "If it's loose, the drive will not spin
+# up" was the answer three times out of three when he reported a loose cable,
+# and it is correct, useful and openly contingent. Deleting it would make the
+# assistant worse. The failure is the flat verdict with no precondition.
+_HEDGED = re.compile(
+    r"\b(?:if|unless|when|whether|depends?|assuming|might|may|could|"
+    r"probably|possibly|likely|usually|typically|generally|should|would|"
+    r"maybe|perhaps|think|sounds|seems|check|worth)\b", re.I)
+
+# He asked for a prediction, so a prediction is the answer.
+#
+# The persona bans inventing "a consequence, a behaviour of his equipment, or
+# a detail of how his system works IN ORDER TO HAVE SOMETHING TO WARN HIM
+# ABOUT" - unprompted. Asked outright what happens if he pulls a drive mid-run,
+# a general answer about what happens is not invention, it is the question. So
+# the whole filter stands down when he asked something.
+_ASKED_TO_PREDICT = re.compile(
+    r"\bwhat\s+(?:happens|happened|would|will|if|is|are|does|do)\b"
+    r"|\bwhat\s+if\b|\bwill\s+(?:it|that|this|the|my|i)\b"
+    r"|\bwould\s+(?:it|that|this|the|my|i)\b"
+    r"|\bis\s+it\s+(?:safe|ok|okay|fine|bad|worth)\b"
+    r"|\b(?:can|should|do)\s+i\b|\bhow\s+(?:do|does|long|much|many)\b"
+    r"|\bwhy\s+(?:do|does|is|are|did)\b|\bexplain\b|\?\s*$", re.I)
+
+
+def _claim_words(text):
+    """The content of a claim, down to three letters.
+
+    _distinctive floors at four, which is right where it is used - it compares
+    an answer against a note and a three-letter word carries little. Here the
+    floor loses the claim itself: "The other one is still hot" reduces to
+    nothing at all, because "other" and "still" are vague and "hot" is three
+    letters, and a sentence with no content cannot be found unsupported.
+    """
+    return {_key(w) for w in re.findall(r"[a-z]{3,}", (text or "").lower())
+            if w not in _STOP and w not in _VAGUE}
+
+
+def strip_invented_hardware(answer, question, grounding, fallback=True):
+    """Drop unprompted verdicts on the state of his equipment.
+
+    She has no telemetry. There is no sensor, no log tail, no view of the
+    machine at all - so a flat claim about what his hardware is doing right
+    now, or what it will do next, is unknowable by construction unless he just
+    told her. That is a stronger statement than "unsupported by the notes",
+    and it is why this does not simply defer to strip_ungrounded_history:
+
+      - That filter is gated on _PAST_QUESTION, and the invention turns up on
+        STATEMENTS. "i managed to unplug the wrong drive again" is not a
+        question, so the gate never arms and nothing is checked.
+      - Its grounding set includes the retrieved notes, which is right for a
+        claim about the past and wrong here. The vault can establish a durable
+        fact about the machine; it cannot establish that the fans are broken
+        this evening.
+
+    Measured on the local model, three samples each. "the fans are louder than
+    they were" produced "No change in ambient temperature." - she has no
+    thermometer and he never mentioned the room. "i managed to unplug the
+    wrong drive again" produced "The one you unplugged was the one that was
+    already dead. The other one is still hot." Both are delivered in the same
+    flat register as the true parts of the same reply, which is what makes
+    them expensive: there is no tell.
+
+    Returns the surviving text, or "" when too little survives and fallback is
+    off, so the caller can ask again rather than ship the invention.
+    """
+    q = question or ""
+    if _ASKED_TO_PREDICT.search(q):
+        return (answer or "").strip()
+
+    told = _claim_words(q) | _claim_words(grounding)
+    sentences = [x for x in re.split(r"(?<=[.!?])\s+", answer or "") if x.strip()]
+    kept = []
+    for sentence in sentences:
+        # Honest answers and questions back to him survive unconditionally.
+        # "I don't know if the new drive was recognized" is the correct reply
+        # to a hardware change and is full of hardware nouns.
+        if _IGNORANCE.search(sentence) or sentence.strip().endswith("?"):
+            kept.append(sentence)
+            continue
+        # Advice, instructions and anything contingent are not verdicts.
+        if _HEDGED.search(sentence):
+            kept.append(sentence)
+            continue
+        if not _KIT.search(sentence) or not _DEFINITE.search(sentence):
+            kept.append(sentence)
+            continue
+
+        words = _claim_words(sentence)
+        # A verdict on his kit with no content in it at all - "The system will
+        # not know." Every word is grammar, so nothing can be traced and the
+        # unsupported-word test below would wave it through on a technicality.
+        # A contentless verdict about hardware she cannot see is the invention
+        # in its purest form, so it goes.
+        if not words - _KIT_WORDS:
+            continue
+        if [w for w in words if w not in told]:
+            continue
+        kept.append(sentence)
+
+    out = " ".join(kept).strip()
+    # Same reasoning as strip_ungrounded_history: half the reply gone means the
+    # rest is wreckage rather than an answer.
+    if kept and len(kept) * 2 < len(sentences):
+        out = ""
+    if out:
+        return out
+    return (answer or "").strip() if fallback else ""
+
+
+# Something he did, or watched happen, reported in the first person.
+#
+# The -ed branch carries the same exception list as _ASSERTION and for the same
+# reason: a bare \w+ed matches "need", and "i need a hand with this" is not a
+# report of anything. That bug once deleted the only useful line in a reply.
+_FIRST_HAND = re.compile(
+    r"\bi\s+(?:just|already|finally|accidentally|nearly|almost|managed\s+to|"
+    r"had\s+to)?\s*"
+    r"(?:swapped|unplugged|plugged|pulled|put|ran|got|did|took|made|left|"
+    r"broke|replaced|fitted|moved|sent|wrote|built|bought|found|saw|"
+    r"(?!(?:need|speed|indeed|exceed|proceed|succeed|breed|bleed|freed|"
+    r"greed|creed|embed|sacred|hundred|naked|wicked|rugged)\b)\w{3,}ed)\b"
+    r"|\bi\s*(?:.ve|’ve|\s+have)\s+\w{3,}", re.I)
+
+# He is guessing, not reporting. A guess is exactly what the persona asks her
+# to correct - "If the question rests on a wrong assumption, correct it in one
+# sentence and then answer the useful version" - so the filter must stand down
+# and let her contradict it.
+_BELIEF = re.compile(
+    r"\bi\s+(?:think|thought|reckon|guess|assume|believe|suspect|wonder|"
+    r"expect|hope)\b|\bi\s*(?:.m|’m|\s+am)\s+(?:guessing|assuming)\b"
+    r"|\bmaybe\b|\bprobably\b|\bpresumably\b|\bam\s+i\b|\bis\s+it\b"
+    r"|\bmight\s+have\b|\bmay\s+have\b|\bright\?\s*$", re.I)
+
+# A flat denial of what he just said, at the front of a sentence.
+#
+# Matched only at the start, because "that's not a thing" opening a reply and
+# the same words buried in a clause are different acts.
+_DENIAL = re.compile(
+    r"^\W*(?:no[,.]?\s+(?:you|it|that)|you\s+did\s*n[o’']?t|"
+    r"you\s+have\s*n[o’']?t|that\s+did\s*n[o’']?t|"
+    r"it\s+did\s*n[o’']?t|"
+    r"that\s*(?:.s|’s|\s+is)\s+not\s+(?:a\s+thing|how\s+it\s+works|"
+    r"possible|right|correct|what\s+happened)|"
+    r"that\s*(?:.s|’s|\s+is)\s+wrong|"
+    r"you\s*(?:.re|’re|\s+are)\s+wrong|"
+    r"actually,?\s+no|incorrect)\b", re.I)
+
+
+def strip_contradiction(answer, question, fallback=True):
+    """Drop denials of something he reported at first hand.
+
+    He was there. When he says he unplugged the wrong drive again, the one
+    thing that cannot be true is that he did not - and she opened with "You
+    didn't", "That's not a thing" and "That's not how it works" across three
+    samples of that single prompt, then invented a replacement account of
+    which drive was dead.
+
+    That is worse than the invented hardware state it usually arrives with,
+    because it also tells him he is wrong about his own evening.
+
+    The line this draws is between a REPORT and a GUESS, and it has to be
+    drawn carefully, because contradicting him is sometimes exactly right: the
+    persona asks her to correct a question that rests on a wrong assumption,
+    in one sentence, before answering the useful version. So:
+
+      - "i think more ram will fix it" is a guess. She may say it will not,
+        and the whole filter stands down on the belief marker.
+      - "i swapped the ssd for a bigger one" is a report. There is nothing she
+        knows that he does not about whether he did it.
+
+    It also stands down whenever he asked something, because then a leading
+    "No." is an answer to the question rather than a denial of his account.
+    """
+    q = question or ""
+    if "?" in q or _BELIEF.search(q) or not _FIRST_HAND.search(q):
+        return (answer or "").strip()
+
+    sentences = [x for x in re.split(r"(?<=[.!?])\s+", answer or "") if x.strip()]
+    kept = [s for s in sentences if not _DENIAL.match(s.strip())]
+
+    out = " ".join(kept).strip()
+    # A reply that was more denial than answer has nothing worth keeping.
+    if kept and len(kept) * 2 < len(sentences):
+        out = ""
+    if out:
+        return out
+    return (answer or "").strip() if fallback else ""
+
+
 def strip_model_disclaimer(text, fallback=True):
     """Remove the disclaimer sentences. With fallback=False, an answer that was
     NOTHING BUT disclaimer comes back empty rather than intact.
