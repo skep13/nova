@@ -111,6 +111,19 @@ _MODEL_DISCLAIMER = re.compile(
     r"(?:an?\s+)?(?:ai|a\s+model|model|language\s+model|program|programme|bot|"
     r"machine|piece\s+of\s+software)\b[^.!?]*[.!?]+", re.I)
 
+# Disclaimers of NATURE rather than of capability.
+#
+# "I'm not a person, so I don't have a state", in reply to "how are you". The
+# noun list did not cover it and the design-language pattern did not either: it
+# claims neither incapacity nor construction, it simply announces what she is
+# not. Same family, same answer.
+_NATURE_DISCLAIMER = re.compile(
+    r"(?:^|(?<=[.!?]))\s*[^.!?]*\bi\s*(?:'m|\u2019m|\s+am)\s+not\s+"
+    r"(?:a\s+)?(?:person|human|alive|conscious|sentient|real)\b[^.!?]*[.!?]+"
+    r"|(?:^|(?<=[.!?]))\s*[^.!?]*\bi\s+(?:do ?n[o\u2019']t|don't)\s+have\s+"
+    r"(?:a\s+)?(?:state|inner life|experience|consciousness|body)\b[^.!?]*[.!?]+",
+    re.I)
+
 _MODEL_CLAUSE = re.compile(
     r",\s*(?:just|only|merely|being)\s+(?:an?\s+)?"
     r"(?:ai|model|language\s+model|program|programme|bot|machine)\b", re.I)
@@ -454,6 +467,7 @@ def strip_model_disclaimer(text, fallback=True):
     """
     cleaned = _MODEL_CLAUSE.sub("", text or "")
     cleaned = _MODEL_DISCLAIMER.sub(" ", cleaned)
+    cleaned = _NATURE_DISCLAIMER.sub(" ", cleaned)
 
     kept = []
     for sentence in re.split(r"(?<=[.!?])\s+", cleaned):
@@ -488,7 +502,13 @@ _COMFORT = re.compile(
     r"a coffee|coffee or|grab a coffee|make a coffee)\b"
     r"|\b(?:take|have|get) (?:a|some) (?:break|rest|breather|nap|walk|bath)\b"
     r"|\b(?:get some rest|early night|put your feet up|treat yourself|"
-    r"step away from|go for a walk|sleep on it)\b", re.I)
+    # "Go to bed" was not on the list, so it went straight out: told he was
+    # knackered after a day of debugging, the reply was "No more debugging. Go
+    # to bed." A ban only ever catches what it names, which is the recurring
+    # cost of enumerating a closed set - and the reason the set is worth
+    # extending the moment one gets past.
+    r"step away from|go for a walk|sleep on it|go to bed|get some sleep|"
+    r"call it a night|knock it on the head|stop for the day)\b", re.I)
 
 # Register that belongs to a call centre.
 _STOCK = re.compile(
