@@ -796,10 +796,12 @@ def t_one_voice():
         problems.append("the operating-role framing is gone")
     # The rules that took the most iterations to make hold.
     for rule, label in (("never describe an action as done", "fabrication rule"),
-                        # She may say what she is. What she may not do is offer
-                        # it as an excuse, which is the failure filters.py
-                        # strips: "I'm just not built for warmth".
-                        ("never offer your own", "no-excuse rule"),
+                        # Reverted to a blanket ban after "you are a
+                        # constructed intelligence and matter-of-fact about it"
+                        # was used as permission for "I'm not a person, so I
+                        # don't have a state" - the exact disclaimer it
+                        # replaced. filters.py strips both shapes regardless.
+                        ("never describe your own nature", "no-disclaimer rule"),
                         ("not everything is a task", "not-a-task rule")):
         if rule not in text.lower():
             problems.append(f"{label} is gone")
