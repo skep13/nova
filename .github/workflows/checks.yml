@@ -63,9 +63,16 @@ jobs:
           git diff --exit-code persona.py \
             || (echo "persona.py is out of date: run extract_persona.py"; exit 1)
 
+      # The postcode and name were purged from the source AND from all 58
+      # commits before this repo was made public. This is the tripwire.
+      #
+      # It excludes itself, because it failed on its own first run: the check
+      # names the strings it is looking for, so `git grep` found them in this
+      # file and reported that an identifier was back in the source. It was
+      # right, technically. This is the only file allowed to say them.
       - name: Nothing personal has crept back in
         run: |
-          if git grep -inI -e "NP7" -e "jacob" -- . ; then
+          if git grep -inI -e "NP7" -e "jacob"                -- . ':(exclude).github/workflows/checks.yml' ; then
             echo "an identifier is back in the source"; exit 1
           fi
           echo "  clean"
