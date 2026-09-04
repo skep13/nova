@@ -7,9 +7,20 @@ fine in a diff. So it is checked mechanically instead.
 """
 import persona as P
 
+# Both personas are checked: the short one ships to small models and is
+# assembled by the same fragile string concatenation.
+
 backslash_n = chr(92) + "n"
 assert backslash_n not in P.PERSONA, "literal backslash-n leaked into the persona"
-assert "nothing to offer." + chr(10) + chr(10) in P.PERSONA, "patched line wrong"
+# Re-pointed at the current persona. The specific sentence does not matter;
+# what matters is that SOME paragraph break survived the JS-to-Python trip,
+# which is exactly what the mangling destroys.
+assert "offering more help." in P.PERSONA, "the persona tail is missing"
 paras = P.PERSONA.count(chr(10) + chr(10)) + 1
 assert paras >= 10, f"paragraph breaks lost: only {paras}"
 print(f"  persona intact: {len(P.PERSONA)} chars, {paras} paragraphs, no stray escapes")
+
+assert backslash_n not in P.PERSONA_SHORT, "literal backslash-n in the short persona"
+assert P.PERSONA_SHORT.count(chr(10) + chr(10)) + 1 >= 6, "short persona lost its breaks"
+print(f"  persona {len(P.PERSONA)} chars / {paras} paragraphs, "
+      f"short {len(P.PERSONA_SHORT)} chars - no escape mangling")

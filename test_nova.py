@@ -598,8 +598,8 @@ def t_closing_offer_stripped():
     The line this test draws moved when the persona was warmed up. It used to
     assert that "Let me know if you want the hourly" should go, on the grounds
     that it is an offer of help. It is, but it is a SPECIFIC one: it names the
-    next thing and moves the conversation along, which is a friend being useful
-    rather than a ticket being closed. Only the contentless offers go now, and
+    next thing and moves the work along, rather than closing a ticket. Only
+    the contentless offers go now, and
     the difference between the two is the whole point of the filter.
     """
     script = (
@@ -757,12 +757,9 @@ def t_rain_looks_ahead():
 def t_one_voice():
     """One character, on the web and on Telegram, with no second persona.
 
-    This used to assert the OPPOSITE: two personas, Nova on the web and Marina
-    on Telegram, and a test that they stayed different. That split was dropped
-    on request in favour of a single warm assistant in both places, so the risk
-    it guarded against has inverted. What can now go wrong is a second persona
-    creeping back in, or the `voice` argument — kept as a no-op so old callers
-    do not crash — quietly acquiring a meaning again.
+    One assistant, on the web and over the bridge. What can go wrong is a
+    second persona creeping back in, or the `voice` argument — kept as a no-op
+    so old callers do not crash — quietly acquiring a meaning again.
 
     Asserted on the prompt rather than on generated replies, because a model is
     sampled: two warm answers in a row would not prove the wiring, and two
@@ -788,13 +785,21 @@ def t_one_voice():
         problems.append(f"persona carries a pictograph: {stray[:3]}")
     # The warmth rule and the assistant framing are the two things the merge
     # was actually for. Either one going missing is the whole change undone.
-    if "warmth is in attention" not in text.lower():
-        problems.append("the warmth rule is gone")
-    if "assistant first" not in text.lower():
-        problems.append("the assistant framing is gone")
+    # The two rules that define the character rather than merely constrain it.
+    # Both were reworded when the persona was replaced: "warmth is in
+    # attention" became "care shows as thoroughness", because telling a model
+    # to be warm gets warmth ANNOUNCED and the same answer underneath, while
+    # telling it to be thorough obliges it to do something.
+    if "care shows as thoroughness" not in text.lower():
+        problems.append("the care rule is gone")
+    if "you run one person" not in text.lower():
+        problems.append("the operating-role framing is gone")
     # The rules that took the most iterations to make hold.
     for rule, label in (("never describe an action as done", "fabrication rule"),
-                        ("never describe your own construction", "no-disclaimer rule"),
+                        # She may say what she is. What she may not do is offer
+                        # it as an excuse, which is the failure filters.py
+                        # strips: "I'm just not built for warmth".
+                        ("never offer your own", "no-excuse rule"),
                         ("not everything is a task", "not-a-task rule")):
         if rule not in text.lower():
             problems.append(f"{label} is gone")
@@ -809,10 +814,9 @@ def t_remembers_him():
     """A fact told once is used in a conversation with no history.
 
     Until this existed she knew nothing about him at all: 1424 notes, none of
-    them about him, and six turns of history held in RAM and lost on restart. A
-    friend who forgets everything between conversations is not a friend however
-    warmly it phrases things, which is why the tone work kept hitting a
-    ceiling.
+    them about him, and six turns of history held in RAM and lost on restart.
+    An assistant that starts from zero every morning cannot be told to sound
+    like one that does not, which is why the tone work kept hitting a ceiling.
 
     Asserted with an EMPTY history on purpose. Anything she knows has to come
     from the stored file, so passing this cannot be an accident of the

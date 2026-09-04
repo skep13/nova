@@ -49,12 +49,13 @@ def strip_comments(js):
 def js_strings(js):
     """Every single-quoted literal, in order, unescaped.
 
-    \\u{...} is handled because the persona contains one emoji and the page
-    must not. This project's no-pictograph test scans the SERVED HTML, and the
-    persona lives inside it — so a literal heart in the character sheet put a
-    literal heart in the page and failed the test, correctly. Written as an
-    escape it is absent from the source and present in the string the model
-    receives, which is what both sides actually want.
+    \\u{...} is handled because a persona MAY need a character the page must
+    not contain literally. The no-pictograph test scans the served HTML and the
+    persona lives inside it, so a pictograph written literally into the
+    character sheet lands in the page and fails that test, correctly. Written
+    as an escape it is absent from the source and present in the string the
+    model receives. The current persona bans emoji outright and needs none of
+    this, but the parser keeps handling it rather than losing the ability.
     """
     out = []
     for lit in re.findall(r"'((?:[^'\\]|\\.)*)'", js):

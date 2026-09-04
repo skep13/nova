@@ -340,10 +340,10 @@ _EMOJI = re.compile(
 async def send_voice(session, chat, text):
     """Speak a reply. Best effort — the text has already been sent.
 
-    Emoji are stripped first. Nova signs soft messages with a heart, which is
-    right in writing and meaningless out loud — Piper either skips it or makes
-    a noise of it, and neither is what the character meant. The written copy
-    keeps it; only the spoken one loses it.
+    Emoji are stripped first. The persona bans them outright, so one should
+    never arrive — but a pictograph reaching Piper is either skipped or turned
+    into a noise, and neither is an answer. Belt and braces on the spoken copy
+    only; the written one is left exactly as sent.
     """
     tok = token()
     text = _EMOJI.sub("", text).strip()
@@ -716,15 +716,16 @@ def _plus_minutes(hhmm, minutes):
 
 
 DIARY_URL = os.environ.get("NOVA_DIARY_URL", "http://remote:5003/diary")
-# When she may start a conversation, and how often. Once a day at most: a
-# friend who messages you five times about the same thing is not a friend.
+# When she may start a conversation, and how often. Once a day at most. An
+# assistant that raises yesterday's loose end is useful; one that raises it
+# five times is an alarm clock you learn to ignore.
 FOLLOWUP_AT = os.environ.get("NOVA_FOLLOWUP_AT", "18:30")
 FOLLOWUP_ON = os.environ.get("NOVA_FOLLOWUP", "1") == "1"
 
 FOLLOWUP_PROMPT = (
     "Below is a note about what this person was doing over the last few days. "
     "Write ONE short message asking about the single most obviously unfinished "
-    "thing — the sort of thing a friend would think to ask about later.\n\n"
+    "thing — the loose end most worth raising.\n\n"
     "One or two sentences. No greeting, no preamble. Ask about something "
     "actually named in the note; never invent a detail, a time, or an outcome. "
     "If nothing in it is worth following up on, reply with exactly: NONE"
@@ -740,7 +741,7 @@ async def watch_followup(session):
 
     Deliberately bounded. One message a day, only when the diary has something
     in it, never twice about the same day, and NOVA_FOLLOWUP=0 turns it off.
-    A friend who messages five times about the same thing is not a friend.
+    Raised once. Repeating it is nagging, not diligence.
     """
     while True:
         try:
@@ -1269,10 +1270,7 @@ async def answer(session, chat, text, spoken=False):
         await send(session, chat, f"Looking into {topic}. This takes a minute.")
         return await research(session, chat, topic, spoken)
 
-    # Marina, not Nova. Same machine, same vault, different character:
-    # Nova is the web assistant and Marina is who answers here.
-    #
-    # And a bigger brain than the 3B. Every prompt fix held and the model kept
+    # A bigger brain than the 3B. Every prompt fix held and the model kept
     # finding a new way to produce the same flat register — that is capacity,
     # not wording, and gpt-oss-120b is roughly forty times the parameters.
     # complete() already falls back to local when a hosted agent is

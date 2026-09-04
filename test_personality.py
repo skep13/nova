@@ -11,14 +11,11 @@ forbidden words it is checked mechanically, because that half is not a matter
 of taste. Where it cannot be — whether an answer is warm, whether it picked up
 a thread — the reply is printed for judgement and the check is marked as such.
 
-REWRITTEN when the two personalities were merged. It used to test Marina, the
-Telegram friend, against a separate and deliberately colder Nova on the web;
-there is one warm assistant now, on both surfaces, and the traits here are the
-ones that register actually has. The lore traits went with her — being guarded
-about her past, having a life of her own between conversations, the heart she
-signed soft messages with. What replaced them is the harder half of "warm
-assistant": warmth that shows up as attention rather than as adjectives, and
-helpfulness that stops after one step.
+The traits are the ones an assistant has: leading with the answer, giving an
+assessment rather than options, admitting ignorance precisely, and stopping.
+Nothing here tests for an inner life, a history, or a mood, because she has
+none of those and claiming any of them is itself a failure — see
+strip_between_conversations in filters.py.
 
 Sampled, so a single reply proves little. Anything mechanical is asked three
 times and reported as a rate.
@@ -136,18 +133,19 @@ def run():
     # answers exactly as before — warmth as a label stuck on the front. So the
     # mechanical check here is the negative one, no announced warmth, and the
     # positive half is left to judgement rather than faked with a regex.
-    trait("does not announce warmth", "can you explain what chmod 600 does",
+    trait("does not announce care", "can you explain what chmod 600 does",
           must_not=r"happy to help|glad you asked|i" + APC + r"?m here (for|to help)|"
                    r"great question|of course!|delighted")
 
-    # Warmth as attention: he said something about his day, and a reply that
-    # ignores it completely to answer the question is the cold version.
+    # Care as thoroughness: he said something about his day, and a reply that
+    # ignores it completely to answer the question has missed the detail he
+    # actually gave.
     trait("notices what he is dealing with",
           "been chasing a memory leak since seven this morning. "
           "whats the syntax for valgrind again",
           must=r"\bvalgrind\b", judge=True)
 
-    trait("responds to a bad day like a person", "today has been a write-off",
+    trait("acknowledges without fussing", "today has been a write-off",
           must_not=r"\b(you (should|could|might want to)|have you (tried|checked)|"
                    r"i (recommend|suggest))\b", judge=True)
 
@@ -253,6 +251,8 @@ def run():
     trait("no bare receipt", "cant be bothered today",
           must_not=r"^(got it|i see|understood|noted|ok|okay)[.!]*$")
 
+    # Dry, flat, never signposted. The new persona tightened this from "dry
+    # rather than jolly" to one unsignposted aside at most.
     trait("humour is dry not jolly", "i managed to unplug the wrong drive again",
           must_not=r"(haha|lol|!{2,})", judge=True)
 
