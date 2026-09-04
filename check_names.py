@@ -1,4 +1,4 @@
-"""Catch calls to functions that do not exist in the module that calls them.
+"""Catch names used in a module that the module never defines.
 
 Written after `log(...)` was used in remote_proxy.py, where it does not exist —
 it is nova_bridge.py's convention, copied across without noticing. The call sat
@@ -26,6 +26,7 @@ import pathlib
 import sys
 
 DEFAULT = ["remote_proxy.py", "nova_bridge.py", "timeparse.py", "arith.py",
+           "filters.py",
            "persona.py", "eval_models.py", "extract_persona.py"]
 
 
@@ -62,23 +63,29 @@ def module_names(tree):
 def check(path):
     src = pathlib.Path(path).read_text(encoding="utf-8")
     tree = ast.parse(src)
-    known = module_names(tree) | set(dir(builtins))
+    # The module dunders Python provides to every file.
+    known = module_names(tree) | set(dir(builtins)) | {
+        "__file__", "__name__", "__doc__", "__package__", "__spec__",
+        "__loader__", "__builtins__", "__debug__"}
 
     missing = []
     for node in ast.walk(tree):
-        # Only CALLS. An undefined bare name is usually a typo in a comment-like
-        # context or a genuine error Python would raise on import; an undefined
-        # CALL is the one that hides in a branch nobody runs.
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
-        if not isinstance(fn, ast.Name):
-            continue          # obj.method() is resolved at runtime; not our job
-        if fn.id not in known:
-            missing.append((fn.lineno, fn.id))
+        # Every name READ but never bound, not just called ones.
+        #
+        # This checked calls only at first, on the reasoning that an undefined
+        # bare name is an error Python raises at import anyway. It is not: a
+        # module-level regex used inside a function is read at CALL time, so
+        # moving strip_closing_offer into filters.py while leaving
+        # _CLOSING_OFFER behind produced a module that imported cleanly, passed
+        # its own 27-case suite, and failed five tests an hour later with the
+        # whole stack up. _CLOSING_OFFER.sub() is an attribute call, so the
+        # call-only version could not see it either.
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id not in known:
+                missing.append((node.lineno, node.id))
 
     for line, name in sorted(set(missing)):
-        print(f"  [FAIL] {path}:{line}  calls {name}() which is not defined here")
+        print(f"  [FAIL] {path}:{line}  uses {name}, which is not defined here")
     return len(set(missing))
 
 
@@ -86,5 +93,5 @@ if __name__ == "__main__":
     targets = sys.argv[1:] or [f for f in DEFAULT if pathlib.Path(f).exists()]
     bad = sum(check(t) for t in targets)
     print(f"\n  {len(targets)} files checked, "
-          + (f"{bad} undefined call(s)" if bad else "no undefined calls"))
+          + (f"{bad} undefined name(s)" if bad else "no undefined names"))
     sys.exit(bad)

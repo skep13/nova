@@ -19,6 +19,8 @@ COPY persona.py /app/persona.py
 COPY timeparse.py /app/timeparse.py
 # Sums, answered by arithmetic instead of by the model.
 COPY arith.py /app/arith.py
+# The answer filters. No dependencies, and tested without a box.
+COPY filters.py /app/filters.py
 WORKDIR /app
 
 ENV LOCAL_URL=http://llama:8080/v1/chat/completions \
